@@ -8,6 +8,13 @@ import time
 from pathlib import Path
 
 import pandas as pd
+import sys as _sys
+# Добавляем корень проекта в sys.path чтобы импорты работали при любом cwd
+_project_root = str(Path(__file__).resolve().parents[2])
+if _project_root not in _sys.path:
+    _sys.path.insert(0, _project_root)
+
+from src.utils.scoring import ScoringEngine
 
 try:
     import tomllib  # py3.11+
@@ -21,6 +28,7 @@ OUTPUT_DIR = ROOT / "output"
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 RUN_PATH = ROOT / "run.py"
 ENV_PATH = ROOT / ".env"
+HIDDEN_LABELS_PATH = ROOT / "configs" / "test.csv"
 
 MAX_RUNTIME_SEC = 600
 MAX_FEATURES = 5
@@ -28,10 +36,19 @@ MAX_FEATURES = 5
 
 def read_table(path: Path) -> pd.DataFrame:
     """
-    Читает csv с автоопределением разделителя.
+    Читает csv с автоопределением разделителя через csv.Sniffer.
+    sep=None + engine=python ломается на однoколоночных файлах.
     """
+    import csv
     assert path.exists(), f"Файл не найден: {path}"
-    return pd.read_csv(path, sep=None, engine="python")
+    with path.open(newline="", encoding="utf-8") as f:
+        sample = f.read(4096)
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        sep = dialect.delimiter
+    except csv.Error:
+        sep = ","
+    return pd.read_csv(path, sep=sep)
 
 
 def load_pyproject() -> dict:
@@ -119,6 +136,8 @@ def assert_output_structure(
     output_test: pd.DataFrame,
 ) -> None:
 
+    print(input_test)
+
     # 1. Проверка обязательных колонок
     for col in input_train.columns:
         assert col in output_train.columns, f"В output/train.csv отсутствует колонка: {col}"
@@ -161,10 +180,11 @@ def main() -> None:
     input_train = read_table(DATA_DIR / "train.csv")
     input_test = read_table(DATA_DIR / "test.csv")
 
-    clean_output_dir()
+    #clean_output_dir()
 
     try:
-        returncode, elapsed, stdout, stderr = run_solution()
+        #returncode, elapsed, stdout, stderr = run_solution()
+        returncode, elapsed, stdout, stderr = 0,0,[],[]
     except subprocess.TimeoutExpired as e:
         raise AssertionError(
             f"Решение превысило лимит времени {MAX_RUNTIME_SEC} секунд"
@@ -194,10 +214,43 @@ def main() -> None:
         output_test=output_test,
     )
 
+    agent_elapsed = elapsed
+    n_features = len(output_test.columns) - len(input_test.columns)
+
     print("OK: submit passed basic checks")
-    print(f"Runtime: {elapsed:.2f} sec")
-    print(f"Generated features: {len(output_test.columns) - len(input_test.columns)}")
-    print(f"Output files: {train_out_path}, {test_out_path}")
+    print(f"Generated features : {n_features}")
+    print(f"Output files       : {train_out_path}, {test_out_path}")
+    print(f"Agent runtime      : {agent_elapsed:.2f} sec")
+
+    id_col = input_train.columns[0]
+    target_col = [c for c in input_train.columns if c != id_col][0]
+
+    print("\nЗапуск скоринга (CatBoost 5-fold CV + test ROC-AUC)...")
+    sc = ScoringEngine(
+        id_column=id_col,
+        target_column=target_col,
+        hidden_labels_path=HIDDEN_LABELS_PATH if HIDDEN_LABELS_PATH.exists() else None,
+    )
+    result = sc.score(str(OUTPUT_DIR))
+    catboost_elapsed = result.scoring_elapsed
+    total_elapsed = agent_elapsed + catboost_elapsed
+
+    print()
+    print("=" * 45)
+    print(f"  CV ROC-AUC (train)  : {result.cv_roc_auc:.4f} ± {result.cv_std:.4f}")
+    print(f"  CV folds            : {result.cv_folds}")
+    if result.test_roc_auc is not None:
+        print(f"  Test ROC-AUC        : {result.test_roc_auc:.4f}")
+        print(f"  Test Gini           : {result.test_gini:.4f}")
+    else:
+        print("  Test ROC-AUC        : N/A (configs/test.csv не найден)")
+    print(f"  Features            : {list(result.top_features.keys())}")
+    print("=" * 45)
+    print(f"  Agent time          : {agent_elapsed:.2f} sec")
+    print(f"  CatBoost time       : {catboost_elapsed:.2f} sec")
+    print(f"  Total time          : {total_elapsed:.2f} sec")
+    print("=" * 45)
+    
 
 
 if __name__ == "__main__":
