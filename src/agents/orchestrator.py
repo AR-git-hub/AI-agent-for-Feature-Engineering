@@ -23,7 +23,7 @@ from src.agents.generator import run_generator
 logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = Path("output")
-TIME_BUDGET = 570          # секунд (оставляем буфер от лимита 600)
+TIME_BUDGET = 500          # секунд (оставляем буфер от лимита 600)
 TIME_FOR_ROUND2 = 200      # минимум секунд для запуска раунда 2
 TIME_EMERGENCY = 60        # меньше этого — сразу save
 
