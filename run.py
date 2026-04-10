@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 from langchain_gigachat.chat_models import GigaChat
-import os
 from dotenv import load_dotenv
-from src.baseline import make_submission
+
+from src.utils.baseline import make_baseline_submission  # пример, как можно сделать успешный сабмит
 
 
 DATA_DIR = Path("data")
@@ -35,8 +36,10 @@ def build_gigachat(config: dict[str, Any]) -> GigaChat:
 
 def main() -> None:
     load_dotenv()
-    gigachat = build_gigachat()
-    make_submission(gigachat)
+    make_baseline_submission()
+
+    # gigachat = build_gigachat()
+    # make_submission(gigachat)
 
 
 if __name__ == "__main__":

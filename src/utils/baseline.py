@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 
 
-def make_submission():
+def make_baseline_submission(*args):
     df_train = pd.read_csv("data/train.csv")
     df_test = pd.read_csv("data/test.csv")
 
