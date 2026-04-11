@@ -15,6 +15,8 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 from langchain_gigachat.chat_models import GigaChat
 
+from src.utils.retry import with_retry
+
 logger = logging.getLogger(__name__)
 
 GENERATOR_SYSTEM_PROMPT = """
@@ -101,7 +103,7 @@ def run_generator(
     ]
 
     logger.info("[generator] Отправка запроса в GigaChat (раунд %d)...", round_num)
-    response = llm.invoke(messages)
+    response = with_retry(llm.invoke, messages)
     raw = response.content.strip()
     logger.info("[generator] Ответ получен, длина=%d символов", len(raw))
 

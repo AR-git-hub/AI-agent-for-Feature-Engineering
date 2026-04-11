@@ -13,6 +13,8 @@ from typing import Any
 
 from langchain_gigachat.chat_models import GigaChat
 
+from src.utils.retry import with_retry
+
 logger = logging.getLogger(__name__)
 
 CRITIC_SYSTEM_PROMPT = """
@@ -95,7 +97,7 @@ def run_critic(
     ]
 
     logger.info("[critic] Отправка запроса в GigaChat...")
-    response = llm.invoke(messages)
+    response = with_retry(llm.invoke, messages)
     raw = response.content.strip()
     logger.info("[critic] Ответ получен, длина=%d символов", len(raw))
 
@@ -159,7 +161,7 @@ def compare_rounds(
         {"role": "user", "content": user_message},
     ]
 
-    response = llm.invoke(messages)
+    response = with_retry(llm.invoke, messages)
     result = _parse_json_response(response.content.strip())
 
     winner = int(result.get("winner", 1))

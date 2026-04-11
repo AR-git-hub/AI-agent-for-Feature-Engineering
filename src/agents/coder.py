@@ -19,6 +19,8 @@ import numpy as np
 import pandas as pd
 from langchain_gigachat.chat_models import GigaChat
 from scipy.stats import spearmanr
+
+from src.utils.retry import with_retry
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.preprocessing import LabelEncoder
 
@@ -32,109 +34,106 @@ MAX_RETRIES = 3
 # ---------------------------------------------------------------------------
 
 BUILD_FEATURES_PROMPT = """
-Ты — агент-кодер. Пишешь Python-код по задаче на естественном языке.
-НЕ придумываешь признаки, НЕ оцениваешь качество. Только код и отладка.
+Ты — агент-кодер. Пишешь Python-код для построения признаков.
+НЕ придумываешь признаки, НЕ оцениваешь качество. Только реализуешь код.
 
-## Три режима (определяется по входному сообщению)
+## Правила написания кода
 
-1. merge_data — мерж двух таблиц, вернуть диагностику JSON в stdout
-2. build_features — построить признаки для train и test
-3. compute_stats — посчитать метрики признаков для критика
-
-## Доступные переменные
-
-id_col, target_col, data_dir ("data/"), output_dir ("output/"),
-separator (","), analysis_report (dict от аналитика).
-
-## Общие правила
-
-- Код самодостаточный: все импорты в начале.
-- Только pandas, numpy, scipy, sklearn. Не pip install.
-- Верни ТОЛЬКО код. Без markdown, без пояснений.
+- Только pandas и numpy. Не pip install, не импортируй ничего кроме них.
+- Верни ТОЛЬКО Python-код. Без markdown, без пояснений, без комментариев.
 
 ---
 
-## Режим 1: merge_data
+## ОБЯЗАТЕЛЬНЫЙ ШАБЛОН КОДА (строго следуй ему)
 
-Прочитай таблицы → приведи ключи к str → pd.merge → сохрани результат.
-Выведи в stdout JSON: left_rows, result_rows, match_rate, relationship
-(1:1 / 1:N / N:M), duplicate_ids_after_merge, new_nulls_pct по колонкам.
+Все переменные уже существуют в памяти. НЕ читай файлы через pd.read_csv.
+Используй переменные напрямую: train, test, и вспомогательные таблицы.
 
----
-
-## Режим 2: build_features (КРИТИЧЕСКИЙ — читай внимательно)
-
-### 5 железных правил
-
-1. ОДНА ФУНКЦИЯ ДЛЯ ОБЕИХ ВЫБОРОК:
 ```python
-def build_features(df, agg_tables, train_stats, id_col):
-    result = df[[id_col]].copy()
-    # ...признаки...
-    return result
-df_train = build_features(train, agg, stats, id_col)
-df_test = build_features(test, agg, stats, id_col)
-```
+import numpy as np
+import pandas as pd
 
-2. НЕТ DATA LEAKAGE — любые групповые статистики (mean, count, target
-   encoding) считай ТОЛЬКО на train, маппи на test через .map():
-```python
-freq = train['cat'].value_counts(normalize=True)
-train['cat_freq'] = train['cat'].map(freq)
-test['cat_freq'] = test['cat'].map(freq).fillna(0)
-```
+original_train_len = len(train)
+original_test_len = len(test)
 
-3. ПРИ 1:N — АГРЕГИРУЙ ДО МЕРЖА:
-```python
-agg = txn.groupby('id').agg(count=('amt','count'), sum=('amt','sum')).reset_index()
-df = df.merge(agg, on='id', how='left')
-assert len(df) == original_len  # строки не размножились
-```
+# Шаг 1: Подготовь агрегаты из вспомогательных таблиц (ТОЛЬКО по train)
+# Пример: агрегация из users_df по user_id
+# user_agg = users_df.groupby('user_id').agg(...).reset_index()
 
-4. ПОСЛЕ ВСЕГО — УБЕРИ NaN И inf:
-```python
+# Шаг 2: Замапь признаки в train и test через .map() или .merge()
+# ВАЖНО: мёрдж делай НЕ по id_col, а по user_id или product_id
+# train_work = train.copy()
+# test_work = test.copy()
+# train_work['feat'] = train_work['user_id'].map(user_agg.set_index('user_id')['feat'])
+# test_work['feat'] = test_work['user_id'].map(user_agg.set_index('user_id')['feat'])
+
+# Шаг 3: Заполни NaN и inf медианой по train
+feature_cols = ['feat_1', 'feat_2', ...]  # замени на реальные имена
 for col in feature_cols:
-    df_train[col] = df_train[col].replace([np.inf, -np.inf], np.nan)
-    df_test[col] = df_test[col].replace([np.inf, -np.inf], np.nan)
-    med = df_train[col].median()
-    df_train[col] = df_train[col].fillna(med if not pd.isna(med) else 0)
-    df_test[col] = df_test[col].fillna(med if not pd.isna(med) else 0)
-```
+    train_work[col] = train_work[col].replace([np.inf, -np.inf], np.nan)
+    test_work[col] = test_work[col].replace([np.inf, -np.inf], np.nan)
+    med = train_work[col].median()
+    fill = med if not pd.isna(med) else 0
+    train_work[col] = train_work[col].fillna(fill)
+    test_work[col] = test_work[col].fillna(fill)
 
-5. ФИНАЛЬНЫЙ ФОРМАТ — df_train: [id_col, target_col, feat_1..feat_N],
-   df_test: [id_col, feat_1..feat_N]. N<=5, dtype float64/int64.
-   Порядок и количество строк = как в исходных файлах.
+# Шаг 4: Собери итоговые датафреймы
+df_train = train_work[[id_col, target_col] + feature_cols].copy()
+df_test = test_work[[id_col] + feature_cols].copy()
 
-### Обязательные проверки в конце кода
-
-```python
-assert df_train[feature_cols].isna().sum().sum() == 0
-assert df_test[feature_cols].isna().sum().sum() == 0
-assert len(feature_cols) <= 5
-assert len(df_train) == original_train_len
-assert len(df_test) == original_test_len
+assert len(df_train) == original_train_len, f"train изменил размер: {len(df_train)} != {original_train_len}"
+assert len(df_test) == original_test_len, f"test изменил размер: {len(df_test)} != {original_test_len}"
+assert df_train[feature_cols].isna().sum().sum() == 0, "NaN в df_train"
+assert df_test[feature_cols].isna().sum().sum() == 0, "NaN в df_test"
 print("BUILD_SUCCESS")
 print(f"Features: {feature_cols}")
 ```
 
----
+## Ключевые правила
 
-## Режим 3: compute_stats
+1. id_col — уникальный идентификатор строки (row_id), НЕ user_id.
+   Мёрдж в train/test делай по user_id или product_id, а НЕ по id_col.
 
-Для каждого признака посчитай: pearson_corr, spearman_corr (scipy.stats),
-mutual_info (sklearn), nulls_pct, nunique, mean, std, zeros_pct, skewness.
-Для пар: correlation_matrix (df.corr()), vif (numpy.linalg.inv диагональ).
-Выведи всё как JSON в stdout, в конце print("STATS_SUCCESS").
+2. Агрегаты считай ТОЛЬКО на вспомогательных таблицах (users_df, orders_df и т.д.),
+   маппируй в train и test через .map() или .merge(on='user_id'/'product_id').
 
----
+3. НЕТ DATA LEAKAGE — любые target encoding считай только на train.
 
-## Обработка ошибок (до 3 попыток)
+4. Обработка 1:N — сначала сгруппируй и сделай agg, потом мёрдж.
+   После мёрджа len(train) не должен меняться.
 
-Получишь свой код + traceback. Не переписывай всё — чини только сломанное.
-Частые причины: KeyError (проверь имена колонок в analysis_report),
-ValueError при merge (приведи ключи к str), assert после merge (агрегируй).
-После 3 неудач верни {"status":"FAILED","error_type":"...","attempts":3}.
+## Обработка ошибок
+
+Получишь код + traceback. Чини только сломанное место. Не переписывай всё.
 """
+
+
+def _load_csv(path: str, sep: str = ",") -> pd.DataFrame:
+    """Загружает CSV с автоопределением разделителя."""
+    try:
+        return pd.read_csv(path, sep=sep)
+    except Exception:
+        return pd.read_csv(path)
+
+
+def _get_table_columns(data_dir: str, analyst_report: dict[str, Any]) -> dict[str, list[str]]:
+    """Возвращает словарь {имя_таблицы: [колонки]} для всех таблиц из отчёта аналитика."""
+    import os
+    result: dict[str, list[str]] = {}
+    tables = analyst_report.get("tables", {})
+    # analyst может вернуть tables как список строк или как dict
+    if isinstance(tables, list):
+        tables = {t: {} for t in tables}
+    for tname, tinfo in tables.items():
+        sep = tinfo.get("separator", ",") if isinstance(tinfo, dict) else ","
+        fpath = os.path.join(data_dir, tname)
+        if os.path.exists(fpath):
+            try:
+                df = pd.read_csv(fpath, nrows=0, sep=sep)
+                result[tname] = list(df.columns)
+            except Exception:
+                pass
+    return result
 
 
 def build_features(
@@ -150,15 +149,69 @@ def build_features(
     """
     id_col = analyst_report.get("id_column", "client_id")
     target_col = analyst_report.get("target_column", "target")
+    data_dir = "data/"
+    output_dir = "output/"
+
+    # Загружаем train/test заранее и передаём в exec — LLM не читает файлы сам
+    logger.info("[coder:build_features] Загрузка train.csv и test.csv...")
+    train = _load_csv(f"{data_dir}train.csv")
+    test = _load_csv(f"{data_dir}test.csv")
+    logger.info("[coder:build_features] train=%s, test=%s", train.shape, test.shape)
+
+    # Собираем реальные колонки всех таблиц для подсказки в промпте
+    table_columns = _get_table_columns(data_dir, analyst_report)
+    # Добавляем train/test если их нет в отчёте
+    table_columns.setdefault("train.csv", list(train.columns))
+    table_columns.setdefault("test.csv", list(test.columns))
+
+    cols_hint = "\n".join(
+        f"  {tname}: {cols}" for tname, cols in table_columns.items()
+    )
 
     features_json = json.dumps(feature_descriptions, ensure_ascii=False, indent=2)
     report_json = json.dumps(analyst_report, ensure_ascii=False, indent=2)
 
+    # Загружаем вспомогательные таблицы и передаём их в exec_globals
+    # чтобы LLM не ошибался с путями и разделителями
+    aux_tables: dict[str, pd.DataFrame] = {}
+    for tname in table_columns:
+        if tname in ("train.csv", "test.csv"):
+            continue
+        fpath = f"{data_dir}{tname}"
+        try:
+            aux_tables[tname] = _load_csv(fpath)
+        except Exception as e:
+            logger.warning("[coder:build_features] Не удалось загрузить %s: %s", tname, e)
+
+    # Подсказка: какие переменные уже загружены в exec_globals
+    aux_vars_hint = "\n".join(
+        f"  {tname.replace('.csv', '_df')} — pd.DataFrame, колонки: {list(df.columns)}"
+        for tname, df in aux_tables.items()
+    )
+
     user_message = (
         f"## Отчёт аналитика\n```json\n{report_json}\n```\n\n"
         f"## Признаки для реализации\n```json\n{features_json}\n```\n\n"
-        f"id_col = '{id_col}'\ntarget_col = '{target_col}'\n\n"
-        "Напиши код. Результат — переменные `df_train` и `df_test`."
+        f"## ВАЖНО: структура данных\n"
+        f"  id_col='{id_col}' — уникальный идентификатор строки (НЕ пользователя!)\n"
+        f"  train содержит колонки: {list(train.columns)}\n"
+        f"  test  содержит колонки: {list(test.columns)}\n"
+        f"  Признаки нужно считать через user_id/product_id во вспомогательных таблицах,\n"
+        f"  затем мёрджить в train/test по user_id или product_id (НЕ по id_col='{id_col}').\n"
+        f"  Финальный df_train должен содержать колонки: [{id_col}, {target_col}, feat_1..feat_N]\n"
+        f"  Финальный df_test  должен содержать колонки: [{id_col}, feat_1..feat_N]\n\n"
+        f"## Переменные уже доступны в коде (НЕ переопределяй, НЕ читай заново):\n"
+        f"  id_col = '{id_col}'\n"
+        f"  target_col = '{target_col}'\n"
+        f"  data_dir = '{data_dir}'\n"
+        f"  train — pd.DataFrame {train.shape}, колонки: {list(train.columns)}\n"
+        f"  test  — pd.DataFrame {test.shape}, колонки: {list(test.columns)}\n"
+        + (f"{aux_vars_hint}\n" if aux_vars_hint else "")
+        + f"\n## Реальные колонки всех таблиц (используй точные имена):\n{cols_hint}\n\n"
+        "Напиши код. Все таблицы уже загружены — НЕ читай файлы через pd.read_csv.\n"
+        "Используй переменные напрямую: train, test, "
+        + ", ".join(f"{t.replace('.csv', '_df')}" for t in aux_tables)
+        + ".\nРезультат — переменные `df_train` и `df_test`."
     )
 
     messages = [
@@ -171,12 +224,20 @@ def build_features(
         logger.info("[coder:build_features] Попытка %d/%d — запрос к GigaChat", attempt, MAX_RETRIES)
 
         if attempt > 1:
+            aux_names = ", ".join(f"{t.replace('.csv', '_df')}" for t in aux_tables)
             messages.append({"role": "user", "content": (
                 f"Код упал с ошибкой:\n{last_error}\n\n"
-                "Исправь код. Верни только исправленный Python-код без объяснений."
+                "Исправь код. Верни только исправленный Python-код без объяснений.\n"
+                f"Напомню: переменные уже существуют — train, test, id_col='{id_col}', "
+                f"target_col='{target_col}', data_dir='{data_dir}'.\n"
+                f"Вспомогательные таблицы: {aux_names}.\n"
+                f"НЕ читай файлы через pd.read_csv — используй переменные напрямую.\n"
+                f"train содержит колонки: {list(train.columns)}\n"
+                f"test  содержит колонки: {list(test.columns)}\n"
+                "Мёрдж в train/test делай по user_id или product_id, НЕ по id_col."
             )})
 
-        response = llm.invoke(messages)
+        response = with_retry(llm.invoke, messages)
         code = _extract_code(response.content)
         logger.info("[coder:build_features] Получен код (%d строк), исполняю...", code.count("\n"))
         messages.append({"role": "assistant", "content": response.content})
@@ -184,7 +245,17 @@ def build_features(
         exec_globals: dict[str, Any] = {
             "id_col": id_col,
             "target_col": target_col,
+            "data_dir": data_dir,
+            "output_dir": output_dir,
+            "train": train.copy(),
+            "test": test.copy(),
+            "analysis_report": analyst_report,
+            "separator": ",",
+            "pd": pd,
+            "np": np,
             "__builtins__": __builtins__,
+            # Вспомогательные таблицы доступны как <имя_без_.csv>_df
+            **{tname.replace(".csv", "_df"): df.copy() for tname, df in aux_tables.items()},
         }
 
         stdout_buf = io.StringIO()

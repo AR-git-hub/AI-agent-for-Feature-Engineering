@@ -223,12 +223,18 @@ def main() -> None:
     print(f"Agent runtime      : {agent_elapsed:.2f} sec")
 
     id_col = input_train.columns[0]
-    target_col = [c for c in input_train.columns if c != id_col][0]
+    # Ищем target явно: последняя колонка input_train, или колонка с именем "target"
+    target_candidates = [c for c in input_train.columns if c.lower() == "target"]
+    target_col = target_candidates[0] if target_candidates else input_train.columns[-1]
+
+    # Оригинальные колонки input — не признаки
+    original_cols = set(input_train.columns) | set(input_test.columns)
 
     print("\nЗапуск скоринга (CatBoost 5-fold CV + test ROC-AUC)...")
     sc = ScoringEngine(
         id_column=id_col,
         target_column=target_col,
+        original_columns=original_cols,
         hidden_labels_path=HIDDEN_LABELS_PATH if HIDDEN_LABELS_PATH.exists() else None,
     )
     result = sc.score(str(OUTPUT_DIR))

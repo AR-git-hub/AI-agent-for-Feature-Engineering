@@ -18,6 +18,7 @@ from langchain_gigachat.chat_models import GigaChat
 from langgraph.prebuilt import create_react_agent
 
 from src.tools.analyst_tools import ANALYST_TOOLS
+from src.utils.retry import with_retry
 
 # ---------------------------------------------------------------------------
 # Системный промпт аналитика
@@ -187,9 +188,10 @@ def run_analyst(llm: GigaChat, task: str = "исследуй данные с н�
         prompt=ANALYST_SYSTEM_PROMPT,
     )
 
-    result = agent.invoke({
-        "messages": [HumanMessage(content=task)]
-    })
+    result = with_retry(
+        agent.invoke,
+        {"messages": [HumanMessage(content=task)]},
+    )
 
     # Извлекаем финальный отчёт из сообщений агента.
     # Ищем последнее tool-сообщение от инструмента `report`.

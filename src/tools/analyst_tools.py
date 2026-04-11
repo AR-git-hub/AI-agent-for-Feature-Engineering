@@ -21,6 +21,25 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR = Path("data")
 
+
+def _safe_json(obj: Any) -> str:
+    """Сериализует объект в JSON, заменяя NaN/Infinity на null.
+
+    Python json.dumps по умолчанию разрешает NaN как литерал, но это не
+    валидный JSON — GigaChat падает с 422. allow_nan=False + конвертация
+    NaN→None решает проблему.
+    """
+    def _convert(o: Any) -> Any:
+        if isinstance(o, float) and (o != o or o == float("inf") or o == float("-inf")):
+            return None
+        if isinstance(o, dict):
+            return {k: _convert(v) for k, v in o.items()}
+        if isinstance(o, list):
+            return [_convert(v) for v in o]
+        return o
+
+    return json.dumps(_convert(obj), ensure_ascii=False)
+
 # Хранилище мерджей, которые кодер уже выполнил (имя → DataFrame).
 # Аналитик может обращаться к ним через table_info / peek_rows по имени.
 _merged_tables: dict[str, pd.DataFrame] = {}
@@ -176,7 +195,7 @@ def table_info(table_name: str) -> str:
         logger.warning("[table_info] '%s': колонки с пропусками >30%%: %s", table_name, high_null_cols)
     logger.info("[table_info] '%s': дубликатов строк=%d", table_name, info["duplicate_rows"])
 
-    return json.dumps(info, ensure_ascii=False)
+    return _safe_json(info)
 
 
 # ---------------------------------------------------------------------------
@@ -213,13 +232,8 @@ def peek_rows(table_name: str, n: int = 5, mode: str = "head") -> str:
         return json.dumps({"error": f"Неизвестный mode='{mode}'. Используйте: head, tail, sample"})
 
     logger.info("[peek_rows] Возвращено %d строк из '%s'", len(rows), table_name)
-    # Конвертируем NaN в None для JSON
-    records = rows.where(pd.notnull(rows), None).to_dict(orient="records")
-    return json.dumps(
-        {"table": table_name, "mode": mode, "n": len(records), "rows": records},
-        ensure_ascii=False,
-        default=str,
-    )
+    records = rows.to_dict(orient="records")
+    return _safe_json({"table": table_name, "mode": mode, "n": len(records), "rows": records})
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +306,7 @@ def request_merge(
         logger.warning("[request_merge] Новые колонки с >50%% пропусков: %s",
                        {k: v for k, v in null_in_new.items() if v > 50})
 
-    return json.dumps({
+    return _safe_json({
         "result_name": result_name,
         "left_rows_before": left_rows_before,
         "rows_after": rows_after,
@@ -301,7 +315,7 @@ def request_merge(
         "new_columns": new_cols,
         "null_pct_in_new_columns": null_in_new,
         "duplicates_in_result": int(merged.duplicated().sum()),
-    }, ensure_ascii=False)
+    })
 
 
 # ---------------------------------------------------------------------------

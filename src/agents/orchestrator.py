@@ -36,26 +36,45 @@ def save(
 ) -> None:
     """Сохраняет финальные признаки в output/train.csv и output/test.csv.
 
-    Проверяет: id и target на месте, признаков не больше 5,
-    структура колонок train и test совпадает.
+    Формат: все исходные колонки input/train.csv + признаки (не более 5).
+    check_submission требует:
+      - все оригинальные колонки присутствуют в выводе
+      - набор признаков (имена и порядок) одинаков в train и test
     """
     id_col = analyst_report.get("id_column", "client_id")
-    target_col = analyst_report.get("target_column", "target")
 
-    # Берём не более 5 признаков
-    cols = feature_cols[:5]
-    logger.info("[save] Сохранение признаков: %s", cols)
+    # Берём не более 5 признаков, которые есть в df_train
+    feat_cols = [c for c in feature_cols[:5] if c in df_train.columns]
+    logger.info("[save] Сохранение признаков: %s", feat_cols)
 
-    # --- train ---
-    train_cols = [id_col] + ([target_col] if target_col in df_train.columns else []) + cols
-    train_cols = [c for c in train_cols if c in df_train.columns]
-    out_train = df_train[train_cols].copy()
+    # Читаем исходные файлы чтобы получить все оригинальные колонки
+    src_train = pd.read_csv(Path("data") / "train.csv")
+    src_test = pd.read_csv(Path("data") / "test.csv")
 
-    # --- test ---
-    test_cols = [id_col] + cols
-    test_cols = [c for c in test_cols if c in df_test.columns]
-    out_test = df_test[test_cols].copy()
+    # Присоединяем признаки train к исходному train по id_col
+    out_train = src_train.merge(
+        df_train[[id_col] + feat_cols],
+        on=id_col,
+        how="left",
+    )
 
+    # Для test берём только признаки, которые есть в df_test;
+    # если какого-то признака нет — добавляем колонку с 0 чтобы наборы совпали
+    test_feat_df = df_test[[c for c in [id_col] + feat_cols if c in df_test.columns]].copy()
+    for col in feat_cols:
+        if col not in test_feat_df.columns:
+            test_feat_df[col] = 0.0
+            logger.warning("[save] Признак '%s' отсутствует в df_test, заполнен нулями", col)
+    test_feat_df = test_feat_df[[id_col] + feat_cols]
+
+    out_test = src_test.merge(
+        test_feat_df,
+        on=id_col,
+        how="left",
+    )
+
+    # Гарантируем одинаковый порядок признаков в обоих файлах
+    # (merge не меняет порядок колонок src, признаки добавляются в конец)
     OUTPUT_DIR.mkdir(exist_ok=True)
     out_train.to_csv(OUTPUT_DIR / "train.csv", index=False)
     out_test.to_csv(OUTPUT_DIR / "test.csv", index=False)

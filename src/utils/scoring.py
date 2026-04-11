@@ -50,10 +50,12 @@ class ScoringEngine:
         id_column: str = "client_id",
         target_column: str = "target",
         hidden_labels_path: str | Path | None = None,
+        original_columns: set | None = None,
     ):
         self.id_column = id_column
         self.target_column = target_column
         self.hidden_labels_path = Path(hidden_labels_path) if hidden_labels_path else None
+        self.original_columns = original_columns
 
     def score(self, output_dir: str) -> ScoringResult:
         t_start = time.perf_counter()
@@ -61,9 +63,13 @@ class ScoringEngine:
         train_df = pd.read_csv(os.path.join(output_dir, "train.csv"))
         test_df = pd.read_csv(os.path.join(output_dir, "test.csv"))
 
-        feature_cols = [
-            c for c in train_df.columns if c not in (self.id_column, self.target_column)
-        ]
+        if self.original_columns:
+            # Признаки — всё что не в оригинальных колонках input
+            feature_cols = [c for c in train_df.columns if c not in self.original_columns]
+        else:
+            feature_cols = [
+                c for c in train_df.columns if c not in (self.id_column, self.target_column)
+            ]
         logger.info("[scoring] Признаки (%d): %s", len(feature_cols), feature_cols)
 
         X_train = train_df[feature_cols].copy()
