@@ -9,7 +9,10 @@
       "Bash(python -m pytest tests/test_coder.py -v)",
       "Bash(python -c \"import pandas as pd; df=pd.read_csv\\('data/train.csv'\\); print\\(df.columns.tolist\\(\\)\\); print\\(df.head\\(2\\)\\)\")",
       "Bash(python run.py)",
-      "Bash(python src/utils/check_submission.py)"
+      "Bash(python src/utils/check_submission.py)",
+      "Bash(python3)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/agents/coder.py', encoding='utf-8'\\).read\\(\\)\\); print\\('syntax ok'\\)\")",
+      "Bash(python -c ':*)"
     ]
   }
 }

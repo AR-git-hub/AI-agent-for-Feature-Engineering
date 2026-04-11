@@ -8,11 +8,11 @@ import time
 from pathlib import Path
 
 import pandas as pd
-import sys as _sys
+
 # Добавляем корень проекта в sys.path чтобы импорты работали при любом cwd
 _project_root = str(Path(__file__).resolve().parents[2])
-if _project_root not in _sys.path:
-    _sys.path.insert(0, _project_root)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 from src.utils.scoring import ScoringEngine
 
@@ -68,8 +68,8 @@ def ensure_env_file() -> None:
     assert ENV_PATH.exists(), "Отсутствует .env"
 
     content = ENV_PATH.read_text(encoding="utf-8").split('\n')
-    assert max(env_var.startswith("GIGACHAT_CREDENTIALS") for env_var in content), "В .env отсутствует GIGACHAT_CREDENTIALS"
-    assert max(env_var.startswith("GIGACHAT_SCOPE") for env_var in content), "В .env отсутствует GIGACHAT_SCOPE"
+    assert any(env_var.startswith("GIGACHAT_CREDENTIALS") for env_var in content), "В .env отсутствует GIGACHAT_CREDENTIALS"
+    assert any(env_var.startswith("GIGACHAT_SCOPE") for env_var in content), "В .env отсутствует GIGACHAT_SCOPE"
 
 def ensure_required_files() -> None:
     assert RUN_PATH.exists(), "Отсутствует run.py"
@@ -101,19 +101,22 @@ def clean_output_dir() -> None:
 
 def run_solution() -> tuple[int, float, str, str]:
     env = os.environ.copy()
+    log_path = ROOT / "run_agent.log"
 
     start = time.perf_counter()
-    proc = subprocess.run(
-        [sys.executable, "run.py"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=MAX_RUNTIME_SEC,
-        env=env,
-    )
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        proc = subprocess.run(
+            [sys.executable, "run.py"],
+            cwd=ROOT,
+            stdout=log_file,
+            stderr=log_file,
+            timeout=MAX_RUNTIME_SEC,
+            env=env,
+        )
     elapsed = time.perf_counter() - start
 
-    return proc.returncode, elapsed, proc.stdout, proc.stderr
+    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    return proc.returncode, elapsed, log_text, ""
 
 
 def assert_output_files_exist() -> tuple[Path, Path]:
@@ -183,18 +186,22 @@ def main() -> None:
     #clean_output_dir()
 
     try:
-        #returncode, elapsed, stdout, stderr = run_solution()
-        returncode, elapsed, stdout, stderr = 0,0,[],[]
+        #returncode, elapsed, log_output, _ = run_solution()
+        returncode, elapsed, log_output, = 0, 0, []
     except subprocess.TimeoutExpired as e:
+        log_path = ROOT / "run_agent.log"
+        tail = log_path.read_text(encoding="utf-8", errors="replace")[-3000:] if log_path.exists() else ""
         raise AssertionError(
-            f"Решение превысило лимит времени {MAX_RUNTIME_SEC} секунд"
+            f"Решение превысило лимит времени {MAX_RUNTIME_SEC} секунд\n\nПоследние логи:\n{tail}"
         ) from e
 
+    print("\n--- Лог агента ---")
+    print(log_output[-8000:] if len(log_output) > 8000 else log_output)
+    print("--- Конец лога ---\n")
+
     assert returncode == 0, (
-        "run.py завершился с ошибкой.\n"
-        f"Return code: {returncode}\n\n"
-        f"STDOUT:\n{stdout[-5000:]}\n\n"
-        f"STDERR:\n{stderr[-5000:]}"
+        f"run.py завершился с ошибкой (код {returncode}). "
+        "Лог выведен выше."
     )
 
     assert elapsed <= MAX_RUNTIME_SEC, (

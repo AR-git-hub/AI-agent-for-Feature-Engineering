@@ -324,61 +324,78 @@ def request_merge(
 
 @tool
 def report(
-    tables: list[str],
+    task_description: str,
     id_column: str,
     target_column: str,
-    key_relations: list[dict],
+    tables: list[dict],
+    joins: list[dict],
     numeric_columns: list[str],
     categorical_columns: list[str],
     datetime_columns: list[str],
-    missing_issues: list[str],
     join_recommendations: list[str],
     potential_problems: list[str],
+    leakage_risks: list[str],
     notes: str = "",
+    answer: str = "",
 ) -> str:
     """Финальный инструмент аналитика. Формирует структурированный JSON-отчёт и завершает исследование.
 
     Args:
-        tables: список использованных таблиц.
-        id_column: имя колонки-идентификатора объекта.
-        target_column: имя колонки-таргета.
-        key_relations: список связей между таблицами, например:
-            [{"left": "train.csv", "right": "client_data.csv", "left_key": "client_id", "right_key": "client_id"}]
-        numeric_columns: числовые колонки в данных.
-        categorical_columns: категориальные колонки в данных.
-        datetime_columns: колонки с датами/временем.
-        missing_issues: описание проблем с пропусками.
-        join_recommendations: рекомендации по объединению таблиц для генератора.
-        potential_problems: потенциальные проблемы (дубли, many-to-many, leakage и т.д.).
-        notes: дополнительные наблюдения.
+        task_description: краткое описание задачи (из readme).
+        id_column: точное имя колонки-идентификатора объекта (например, "client_id").
+        target_column: точное имя колонки-таргета (например, "target").
+        tables: список таблиц, каждая — dict:
+            {"name": "client_data.csv", "rows": 41188, "cols": 21,
+             "separator": ",",
+             "join_key_to_train": "client_id",
+             "relationship": "1:1" | "1:N" | "N:M",
+             "match_rate": 0.95,
+             "columns_sample": ["client_id", "age", "job", ...],
+             "notes": "содержит макроэкономические индикаторы"}
+        joins: список связей между таблицами, например:
+            [{"left": "train.csv", "right": "client_data.csv",
+              "left_key": "client_id", "right_key": "client_id",
+              "how": "left", "relationship": "1:1", "match_rate": 1.0,
+              "notes": "полное покрытие"}]
+        numeric_columns: ВСЕ числовые колонки (из всех таблиц, уникально).
+        categorical_columns: ВСЕ категориальные колонки (с примерами значений в notes).
+        datetime_columns: ВСЕ колонки с датами/временем.
+        join_recommendations: конкретные инструкции для генератора/кодера:
+            ["train LEFT JOIN client_data ON client_id — 1:1, match 100%",
+             "для month/day_of_week — это строки вида 'may','mon'; кодировать через map"]
+        potential_problems: потенциальные проблемы (дубли, many-to-many, выбросы, константы).
+        leakage_risks: колонки с подозрением на data leakage.
+        notes: любые дополнительные наблюдения (форматы дат, примеры значений категорий).
+        answer: заполняется ТОЛЬКО в режиме 2 (уточняющий вопрос от критика). Иначе "".
 
     Этот отчёт передаётся оркестратору и используется генератором и кодером.
     """
     logger.info(
-        "[report] Формирование финального отчёта: таблиц=%d, числовых колонок=%d, "
-        "категориальных=%d, дат=%d",
-        len(tables), len(numeric_columns), len(categorical_columns), len(datetime_columns),
+        "[report] Финальный отчёт: таблиц=%d, числовых=%d, категориальных=%d, дат=%d, joins=%d",
+        len(tables), len(numeric_columns), len(categorical_columns), len(datetime_columns), len(joins),
     )
     if potential_problems:
-        logger.warning("[report] Потенциальные проблемы: %s", potential_problems)
+        logger.warning("[report] Проблемы: %s", potential_problems)
+    if leakage_risks:
+        logger.warning("[report] Leakage risks: %s", leakage_risks)
     logger.info("[report] Отчёт сформирован. Исследование завершено.")
 
     analyst_report = {
-        "tables": tables,
+        "task_description": task_description,
         "id_column": id_column,
         "target_column": target_column,
-        "key_relations": key_relations,
-        "columns": {
-            "numeric": numeric_columns,
-            "categorical": categorical_columns,
-            "datetime": datetime_columns,
-        },
-        "missing_issues": missing_issues,
+        "tables": tables,
+        "joins": joins,
+        "numeric_columns": numeric_columns,
+        "categorical_columns": categorical_columns,
+        "datetime_columns": datetime_columns,
         "join_recommendations": join_recommendations,
         "potential_problems": potential_problems,
+        "leakage_risks": leakage_risks,
         "notes": notes,
+        "answer": answer or None,
     }
-    return json.dumps({"analyst_report": analyst_report}, ensure_ascii=False)
+    return _safe_json({"analyst_report": analyst_report})
 
 
 # ---------------------------------------------------------------------------

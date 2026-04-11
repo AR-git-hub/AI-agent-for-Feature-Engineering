@@ -18,52 +18,113 @@ from src.utils.retry import with_retry
 logger = logging.getLogger(__name__)
 
 CRITIC_SYSTEM_PROMPT = """
-Ты — критик. Оцени набор признаков по метрикам и верни JSON.
+Ты — критик качества признаков. Получаешь статистику по набору признаков и выносишь вердикт.
 
-## Пороги оценки
+Задача: объективно оценить каждый признак по метрикам и сформировать КОНКРЕТНЫЙ actionable фидбек
+для генератора — что заменить и чем.
 
-Сила: |pearson|>0.05 или MI>0.01 — полезен. MI>0.05 — сильный.
-Мусор: nunique=1, null_pct>80%, zeros_pct>95%.
-Дубль: max_corr_with_others>0.85 — дублирует другой признак.
-Leakage: |pearson|>0.9 или MI>0.5 — подозрителен.
+---
 
-## overall_score
+## Пороги оценки признаков
 
->=0.8 — второй раунд не нужен. 0.6–0.8 — желателен. <0.6 — обязателен.
+### Сила признака (насколько информативен для таргета)
+- MI >= 0.05 и |pearson| >= 0.10 → СИЛЬНЫЙ  (score 0.80–1.00, verdict="strong")
+- MI >= 0.01 или |pearson| >= 0.05 → ПОЛЕЗНЫЙ (score 0.50–0.79, verdict="useful")
+- MI <  0.01 и |pearson| <  0.05 → СЛАБЫЙ   (score 0.20–0.49, verdict="weak")
 
-## Ответ — ТОЛЬКО JSON:
+### Признак-мусор → verdict="weak", score <= 0.2
+- nunique = 1 — константа
+- null_pct > 80% — почти весь NaN
+- high_collinearity = True (max_corr_with_others > 0.85) — дублирует другой признак
+
+### Подозрение на leakage → verdict="suspicious_leakage", score <= 0.2
+- |pearson| > 0.9
+- mutual_info > 0.5
+
+---
+
+## Правило overall_score (0.0–1.0)
+
+1. Отбрось признаки с verdict="suspicious_leakage" (даже один такой — серьёзный штраф).
+2. Для остальных: base = среднее значение score.
+3. Штраф −0.10 за каждую пару с high_collinearity.
+4. Штраф −0.05 за каждый признак с null_pct > 30%.
+5. Если хотя бы один leakage — штраф −0.30 к итогу.
+6. Итог ограничь диапазоном [0.0, 1.0].
+
+Интерпретация:
+- overall_score >= 0.75 → набор силён, need_second_round=false
+- 0.55 <= overall_score < 0.75 → приемлем, need_second_round=true (если есть время)
+- overall_score < 0.55 → слабый, need_second_round=true
+
+---
+
+## Правила feedback_for_generator
+
+Фидбек должен быть конкретным и actionable:
+- НЕ пиши "признаки слабые" — пиши что именно заменить и чем
+- Укажи конкретные таблицы/колонки которые стоит использовать вместо слабых
+- Если есть коллинеарность — скажи какой из пары оставить (с большим MI)
+- Если все признаки из одной таблицы — предложи добавить признаки из других таблиц
+- Если признаки слишком простые — предложи более сложные агрегации или взаимодействия
+
+Пример хорошего фидбека:
+"day_of_week_encoded слабый (MI=0.005) — заменить на user_reorder_rate из order_items.
+order_frequency и basket_to_order_ratio коллинеарны (corr=0.91) — оставить только basket_to_order_ratio.
+Все признаки на уровне пользователя — добавить признак на уровне пары (user_id, product_id):
+частота покупки конкретного товара этим пользователем из order_items."
+
+---
+
+## Ответ — ТОЛЬКО JSON, без пояснений до или после:
 
 {
-  "ranking": ["лучший", "второй", ...],
+  "ranking": ["лучший_признак", "второй", "третий", "четвертый", "худший"],
   "scores": {
-    "имя": {"score": 0.75, "verdict": "strong|weak|suspicious_leakage", "reason": "почему"}
+    "имя_признака": {
+      "score": 0.75,
+      "verdict": "strong",
+      "reason": "конкретное обоснование: MI=0.04, pearson=0.15, нет пропусков"
+    }
   },
   "overall_score": 0.65,
   "need_second_round": true,
   "need_clarification": false,
   "clarification_question": "",
-  "feedback_for_generator": "что улучшить",
-  "confidence": "high|medium|low"
+  "feedback_for_generator": "конкретный actionable фидбек: что заменить, чем, из каких таблиц",
+  "confidence": "high"
 }
+
+Допустимые значения verdict: "strong" | "useful" | "weak" | "suspicious_leakage"
+Допустимые значения confidence: "high" | "medium" | "low"
 """
 
 CRITIC_COMPARE_PROMPT = """
-Сравни два набора признаков. Лучший — максимум суммы MI
-при минимуме корреляций между признаками, минимуме пропусков,
-без leakage. Ответ — ТОЛЬКО JSON:
+Ты — критик. Сравни два набора признаков и выбери лучший.
 
-{"winner": 1, "reason": "почему", "round1_overall": 0.65, "round2_overall": 0.72}
-"""
+## Критерии сравнения (по убыванию приоритета)
 
-CRITIC_COMPARE_PROMPT = """
-Сравни два набора признаков. Критерии (по приоритету):
-1. Нет leakage (|pearson|>0.9 или MI>0.5 — дисквалификация признака)
-2. Максимум суммарного MI оставшихся признаков
-3. Все попарные корреляции между признаками < 0.85
-4. Минимум пропусков
+1. LEAKAGE — дисквалифицирует набор:
+   |pearson| > 0.9 или MI > 0.5 для любого признака → этот набор проигрывает автоматически.
 
-Ответ — ТОЛЬКО JSON:
-{"winner": 1, "reason": "почему", "round1_overall": 0.65, "round2_overall": 0.72}
+2. СУММАРНЫЙ MI — чем выше сумма MI по всем признакам без leakage, тем лучше.
+
+3. РАЗНООБРАЗИЕ — штраф за коллинеарность:
+   если max_corr_with_others > 0.85 для нескольких пар — набор хуже.
+
+4. КАЧЕСТВО ПОКРЫТИЯ — штраф за пропуски:
+   средний null_pct по признакам должен быть минимальным.
+
+5. При равенстве по MI — предпочти набор с меньшим числом слабых признаков (MI < 0.01).
+
+## Ответ — ТОЛЬКО JSON:
+
+{
+  "winner": 1,
+  "reason": "конкретное обоснование: суммарный MI раунда 2 = 0.18 vs 0.12 у раунда 1; нет leakage в обоих",
+  "round1_overall": 0.65,
+  "round2_overall": 0.72
+}
 """
 
 
@@ -98,7 +159,7 @@ def run_critic(
 
     logger.info("[critic] Отправка запроса в GigaChat...")
     response = with_retry(llm.invoke, messages)
-    raw = response.content.strip()
+    raw = (response.content if isinstance(response.content, str) else str(response.content)).strip()
     logger.info("[critic] Ответ получен, длина=%d символов", len(raw))
 
     result = _parse_json_response(raw)
@@ -162,7 +223,8 @@ def compare_rounds(
     ]
 
     response = with_retry(llm.invoke, messages)
-    result = _parse_json_response(response.content.strip())
+    raw_compare = (response.content if isinstance(response.content, str) else str(response.content)).strip()
+    result = _parse_json_response(raw_compare)
 
     winner = int(result.get("winner", 1))
     reason = result.get("reason", "")

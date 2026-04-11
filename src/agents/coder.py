@@ -34,20 +34,60 @@ MAX_RETRIES = 3
 # ---------------------------------------------------------------------------
 
 BUILD_FEATURES_PROMPT = """
-Ты — агент-кодер. Пишешь Python-код для построения признаков.
-НЕ придумываешь признаки, НЕ оцениваешь качество. Только реализуешь код.
+Ты — агент-кодер. Пишешь Python-код для построения признаков. Ничего не придумываешь сам — реализуешь ТЗ генератора.
 
-## Правила написания кода
+## Формат ответа
 
-- Только pandas и numpy. Не pip install, не импортируй ничего кроме них.
-- Верни ТОЛЬКО Python-код. Без markdown, без пояснений, без комментариев.
+Верни ТОЛЬКО Python-код (без markdown, без пояснений). Используй только pandas и numpy.
+Все переменные уже существуют. НЕ читай файлы через pd.read_csv.
 
 ---
 
-## ОБЯЗАТЕЛЬНЫЙ ШАБЛОН КОДА (строго следуй ему)
+## КРИТИЧЕСКИ ВАЖНО: работа со строковыми категориями
 
-Все переменные уже существуют в памяти. НЕ читай файлы через pd.read_csv.
-Используй переменные напрямую: train, test, и вспомогательные таблицы.
+В данных МОГУТ быть строковые колонки (например month='may', day_of_week='mon', job='admin').
+Прямое `.astype(int)` или арифметика над ними падает с ValueError.
+
+### Правила обработки категориальных колонок
+
+Если колонка типа object/string — ВСЕГДА делай одно из:
+
+1. **Частотное кодирование (freq encoding)** — безопасно, работает всегда:
+   ```python
+   freq_map = client_data_df['job'].value_counts(normalize=True).to_dict()
+   train_work['job_freq'] = train_work['client_id'].map(
+       client_data_df.set_index('client_id')['job']
+   ).map(freq_map).fillna(0)
+   ```
+
+2. **Target encoding** — только по train, потом маппировать на test:
+   ```python
+   # Соединяем train с client_data чтобы получить категорию
+   train_with_cat = train.merge(client_data_df[['client_id','job']], on='client_id', how='left')
+   te_map = train_with_cat.groupby('job')[target_col].mean().to_dict()
+   global_mean = train[target_col].mean()
+   train_work['job_te'] = train_with_cat['job'].map(te_map).fillna(global_mean)
+   test_with_cat = test.merge(client_data_df[['client_id','job']], on='client_id', how='left')
+   test_work['job_te'] = test_with_cat['job'].map(te_map).fillna(global_mean)
+   ```
+
+3. **Явный маппинг упорядоченных категорий** через dict:
+   ```python
+   MONTH_MAP = {'jan':1,'feb':2,'mar':3,'apr':4,'may':5,'jun':6,
+                'jul':7,'aug':8,'sep':9,'oct':10,'nov':11,'dec':12}
+   DOW_MAP = {'mon':0,'tue':1,'wed':2,'thu':3,'fri':4,'sat':5,'sun':6}
+   # использовать через .map(MONTH_MAP) — результат числовой, можно брать sin/cos
+   ```
+
+### НИКОГДА не делай
+
+- `pd.to_numeric(series)` на строковой колонке без errors='coerce'
+- `.astype(int)` / `.astype(float)` на строках типа 'may','mon'
+- Арифметику и sin/cos поверх необработанных строк
+
+---
+
+## ОБЯЗАТЕЛЬНЫЙ ШАБЛОН КОДА
 
 ```python
 import numpy as np
@@ -56,55 +96,75 @@ import pandas as pd
 original_train_len = len(train)
 original_test_len = len(test)
 
-# Шаг 1: Подготовь агрегаты из вспомогательных таблиц (ТОЛЬКО по train)
-# Пример: агрегация из users_df по user_id
-# user_agg = users_df.groupby('user_id').agg(...).reset_index()
+train_work = train.copy()
+test_work  = test.copy()
 
-# Шаг 2: Замапь признаки в train и test через .map() или .merge()
-# ВАЖНО: мёрдж делай НЕ по id_col, а по user_id или product_id
-# train_work = train.copy()
-# test_work = test.copy()
-# train_work['feat'] = train_work['user_id'].map(user_agg.set_index('user_id')['feat'])
-# test_work['feat'] = test_work['user_id'].map(user_agg.set_index('user_id')['feat'])
+# Шаг 1: Собрать признаки в временные Series/DataFrame
+# Используй .map() / .merge() для привязки к train/test по ключу (например client_id).
+# Категориальные колонки обрабатывай строго через freq/target encoding или явный dict.
 
-# Шаг 3: Заполни NaN и inf медианой по train
-feature_cols = ['feat_1', 'feat_2', ...]  # замени на реальные имена
+# Пример 1 — числовой признак из client_data:
+# num_map = client_data_df.set_index('client_id')['age']
+# train_work['age_feat'] = train_work['client_id'].map(num_map)
+# test_work['age_feat']  = test_work['client_id'].map(num_map)
+
+# Пример 2 — freq encoding категории job:
+# job_freq = client_data_df['job'].value_counts(normalize=True).to_dict()
+# train_work['job_freq'] = train_work['client_id'].map(
+#     client_data_df.set_index('client_id')['job']).map(job_freq).fillna(0)
+# test_work['job_freq']  = test_work['client_id'].map(
+#     client_data_df.set_index('client_id')['job']).map(job_freq).fillna(0)
+
+# Шаг 2: перечисли имена признаков
+feature_cols = ['feat_1', 'feat_2']  # ЗАМЕНИ на реальные имена
+
+# Шаг 3: Заполни NaN/inf медианой по train (для числовых) или 0 (для всего остального)
 for col in feature_cols:
-    train_work[col] = train_work[col].replace([np.inf, -np.inf], np.nan)
-    test_work[col] = test_work[col].replace([np.inf, -np.inf], np.nan)
-    med = train_work[col].median()
-    fill = med if not pd.isna(med) else 0
-    train_work[col] = train_work[col].fillna(fill)
-    test_work[col] = test_work[col].fillna(fill)
+    s_train = pd.to_numeric(train_work[col], errors='coerce')
+    s_test  = pd.to_numeric(test_work[col],  errors='coerce')
+    s_train = s_train.replace([np.inf, -np.inf], np.nan)
+    s_test  = s_test.replace([np.inf, -np.inf], np.nan)
+    med = s_train.median()
+    fill = float(med) if not pd.isna(med) else 0.0
+    train_work[col] = s_train.fillna(fill).astype(float)
+    test_work[col]  = s_test.fillna(fill).astype(float)
 
-# Шаг 4: Собери итоговые датафреймы
+# Шаг 4: Собрать итоговые df_train / df_test
 df_train = train_work[[id_col, target_col] + feature_cols].copy()
-df_test = test_work[[id_col] + feature_cols].copy()
+df_test  = test_work[[id_col] + feature_cols].copy()
 
-assert len(df_train) == original_train_len, f"train изменил размер: {len(df_train)} != {original_train_len}"
-assert len(df_test) == original_test_len, f"test изменил размер: {len(df_test)} != {original_test_len}"
-assert df_train[feature_cols].isna().sum().sum() == 0, "NaN в df_train"
-assert df_test[feature_cols].isna().sum().sum() == 0, "NaN в df_test"
+assert len(df_train) == original_train_len
+assert len(df_test)  == original_test_len
+assert df_train[feature_cols].isna().sum().sum() == 0
+assert df_test[feature_cols].isna().sum().sum() == 0
 print("BUILD_SUCCESS")
 print(f"Features: {feature_cols}")
 ```
 
+---
+
 ## Ключевые правила
 
-1. id_col — уникальный идентификатор строки (row_id), НЕ user_id.
-   Мёрдж в train/test делай по user_id или product_id, а НЕ по id_col.
+1. **id_col** — идентификатор строки для сохранения. Мёрдж с доп.таблицами делай по тому же полю,
+   которое выступает ключом (часто это и есть client_id = id_col, или user_id — смотри отчёт аналитика).
 
-2. Агрегаты считай ТОЛЬКО на вспомогательных таблицах (users_df, orders_df и т.д.),
-   маппируй в train и test через .map() или .merge(on='user_id'/'product_id').
+2. **Размер не меняется**: `len(df_train) == original_train_len`, `len(df_test) == original_test_len`.
+   Если связь 1:N — сначала groupby+agg на доп.таблице, потом map/merge.
 
-3. НЕТ DATA LEAKAGE — любые target encoding считай только на train.
+3. **Нет NaN в финале**: заполняй всё медианой/нулём. Проверяй assert.
 
-4. Обработка 1:N — сначала сгруппируй и сделай agg, потом мёрдж.
-   После мёрджа len(train) не должен меняться.
+4. **Нет data leakage**: target encoding считай ТОЛЬКО по train. На test — маппируй готовую таблицу.
+
+5. **Все итоговые признаки — числовые (float)**: CatBoost принимает строки как cat_features,
+   но сохранённые признаки лучше кодировать числом, чтобы compute_stats/scoring работали стабильно.
+
+6. **Максимум 5 признаков**: ровно столько, сколько предложил генератор (≤5).
 
 ## Обработка ошибок
 
-Получишь код + traceback. Чини только сломанное место. Не переписывай всё.
+Получишь код + traceback. Чини только сломанное место. Если ошибка была на строковом значении
+(например `can't multiply sequence by non-int`, `could not convert string to float`) — значит
+ты пытался делать арифметику на строковой колонке. Переделай через freq/target encoding.
 """
 
 
@@ -117,13 +177,31 @@ def _load_csv(path: str, sep: str = ",") -> pd.DataFrame:
 
 
 def _get_table_columns(data_dir: str, analyst_report: dict[str, Any]) -> dict[str, list[str]]:
-    """Возвращает словарь {имя_таблицы: [колонки]} для всех таблиц из отчёта аналитика."""
+    """Возвращает словарь {имя_таблицы: [колонки]} для всех таблиц из отчёта аналитика.
+
+    Поддерживает разные форматы tables в отчёте:
+      - list[dict] (новый формат): [{"name": "x.csv", "separator": ",", ...}]
+      - list[str]: ["x.csv", "y.csv"]
+      - dict[str, dict]: {"x.csv": {"separator": ","}}
+    """
     import os
     result: dict[str, list[str]] = {}
-    tables = analyst_report.get("tables", {})
-    # analyst может вернуть tables как список строк или как dict
-    if isinstance(tables, list):
-        tables = {t: {} for t in tables}
+    tables_raw = analyst_report.get("tables", {})
+
+    # Нормализуем в dict[str, dict]
+    tables: dict[str, dict] = {}
+    if isinstance(tables_raw, list):
+        for item in tables_raw:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("table") or item.get("file")
+                if name:
+                    tables[name] = item
+            elif isinstance(item, str):
+                tables[item] = {}
+    elif isinstance(tables_raw, dict):
+        for k, v in tables_raw.items():
+            tables[k] = v if isinstance(v, dict) else {}
+
     for tname, tinfo in tables.items():
         sep = tinfo.get("separator", ",") if isinstance(tinfo, dict) else ","
         fpath = os.path.join(data_dir, tname)
@@ -163,6 +241,21 @@ def build_features(
     # Добавляем train/test если их нет в отчёте
     table_columns.setdefault("train.csv", list(train.columns))
     table_columns.setdefault("test.csv", list(test.columns))
+
+    # Страховка: подхватываем все CSV из data/ даже если аналитик про них забыл/
+    # передал tables в неожиданном формате. Критично, чтобы aux_tables были доступны в exec.
+    import os as _os
+    try:
+        for fname in _os.listdir(data_dir):
+            if fname.lower().endswith(".csv") and fname not in table_columns:
+                try:
+                    df_head = pd.read_csv(f"{data_dir}{fname}", nrows=0)
+                    table_columns[fname] = list(df_head.columns)
+                    logger.info("[coder:build_features] Авто-подхват таблицы: %s", fname)
+                except Exception as e:
+                    logger.warning("[coder:build_features] Не удалось прочитать %s: %s", fname, e)
+    except Exception as e:
+        logger.warning("[coder:build_features] Не удалось сканировать %s: %s", data_dir, e)
 
     cols_hint = "\n".join(
         f"  {tname}: {cols}" for tname, cols in table_columns.items()
@@ -238,9 +331,10 @@ def build_features(
             )})
 
         response = with_retry(llm.invoke, messages)
-        code = _extract_code(response.content)
+        raw_content = response.content if isinstance(response.content, str) else str(response.content)
+        code = _extract_code(raw_content)
         logger.info("[coder:build_features] Получен код (%d строк), исполняю...", code.count("\n"))
-        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "assistant", "content": raw_content})
 
         exec_globals: dict[str, Any] = {
             "id_col": id_col,
@@ -313,7 +407,7 @@ def compute_stats(
         logger.warning("[coder:compute_stats] Нет признаков для анализа")
         return {"features": {}}
 
-    y = df_train[target_col].values
+    y = np.asarray(df_train[target_col].values)
     stats: dict[str, dict[str, Any]] = {}
 
     # Подготавливаем числовую матрицу
@@ -321,7 +415,7 @@ def compute_stats(
     for col in feature_cols:
         series = df_train[col]
         if pd.api.types.is_numeric_dtype(series):
-            X_encoded[col] = series.fillna(-999)
+            X_encoded[col] = pd.to_numeric(series, errors="coerce").fillna(-999).astype(float)
         else:
             le = LabelEncoder()
             X_encoded[col] = le.fit_transform(series.astype(str).fillna("__null__"))
@@ -331,28 +425,40 @@ def compute_stats(
         mi_scores = mutual_info_classif(X_encoded.values, y, random_state=42)
     except Exception as e:
         logger.warning("[coder:compute_stats] mutual_info_classif ошибка: %s", e)
-        mi_scores = [0.0] * len(feature_cols)
+        mi_scores = np.zeros(len(feature_cols))
 
     for i, col in enumerate(feature_cols):
         series = df_train[col]
-        col_enc = X_encoded[col].values
+        col_enc = np.asarray(X_encoded[col].values, dtype=float)
 
         null_pct = round(float(series.isna().mean()) * 100, 2)
         nunique = int(series.nunique())
 
         # Pearson
         try:
-            pearson = round(float(np.corrcoef(col_enc, y)[0, 1]), 4)
-            if np.isnan(pearson):
+            if np.std(col_enc) == 0 or np.std(y) == 0:
                 pearson = 0.0
+            else:
+                pearson = round(float(np.corrcoef(col_enc, y.astype(float))[0, 1]), 4)
+                if np.isnan(pearson):
+                    pearson = 0.0
         except Exception:
             pearson = 0.0
 
-        # Spearman
+        # Spearman — scipy >=1.9 возвращает SignificanceResult с .statistic,
+        # старые версии — именованный кортеж с .correlation. Извлекаем безопасно.
         try:
-            spearman = round(float(spearmanr(col_enc, y).correlation), 4)
-            if np.isnan(spearman):
-                spearman = 0.0
+            sp_res = spearmanr(col_enc, y)
+            val = getattr(sp_res, "statistic", None)
+            if val is None:
+                val = getattr(sp_res, "correlation", None)
+            if val is None:
+                try:
+                    val = sp_res[0]  # type: ignore[index]
+                except Exception:
+                    val = 0.0
+            spearman_f = float(np.asarray(val, dtype=float))
+            spearman = 0.0 if np.isnan(spearman_f) else round(spearman_f, 4)
         except Exception:
             spearman = 0.0
 
@@ -375,8 +481,12 @@ def compute_stats(
         corr_matrix = X_encoded.corr().abs()
         for col in feature_cols:
             other_cols = [c for c in feature_cols if c != col]
-            max_corr = corr_matrix.loc[col, other_cols].max()
-            stats[col]["max_corr_with_others"] = round(float(max_corr), 4)
+            # loc[row_label, list_of_cols] — валидный pandas, но у некоторых stubs
+            # возникают ошибки типов; приводим явно к float через numpy.
+            row_vals = np.asarray(corr_matrix.loc[col][other_cols].values, dtype=float)
+            row_vals = row_vals[~np.isnan(row_vals)]
+            max_corr = float(row_vals.max()) if row_vals.size else 0.0
+            stats[col]["max_corr_with_others"] = round(max_corr, 4)
             stats[col]["high_collinearity"] = bool(max_corr > 0.85)
             if max_corr > 0.85:
                 logger.warning(
