@@ -1,3 +1,4 @@
+
 # SBER MAS — сабмит
 
 ## Окружение
@@ -40,3 +41,7 @@ GIGACHAT_SCOPE=GIGACHAT_API_CORP
 ## Код
 
 Пакет **`mas`** расположен в `src/mas/`. Точка входа — **`run.py`** в корне.
+=======
+# AI-agent-for-Feature-Engineering
+Revolutionary AI agent (MAS) for feature engineering based on smart algoritms. Developed as a hackaton solution for SBER
+
