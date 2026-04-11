@@ -9,7 +9,7 @@ def calc_metric(arr):
 def calc_best_split(arr):
     best_border = 0
     best_metric = float('inf')
-    for border in range(1, len(arr) - 1):
+    for border in range(1, len(arr)):
         l = arr[:border]
         r = arr[border:]
 
