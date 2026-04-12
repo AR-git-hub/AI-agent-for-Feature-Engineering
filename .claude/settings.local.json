@@ -12,7 +12,9 @@
       "Bash(python src/utils/check_submission.py)",
       "Bash(python3)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('src/agents/coder.py', encoding='utf-8'\\).read\\(\\)\\); print\\('syntax ok'\\)\")",
-      "Bash(python -c ':*)"
+      "Bash(python -c ':*)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('src/agents/orchestrator.py', encoding='utf-8'\\).read\\(\\)\\); print\\('syntax ok'\\)\")",
+      "Bash(python -c \"from src.agents.orchestrator import run_pipeline, _oof_quality_check; print\\('imports ok'\\)\")"
     ]
   }
 }
