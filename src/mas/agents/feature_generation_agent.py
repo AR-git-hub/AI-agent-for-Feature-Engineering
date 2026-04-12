@@ -56,10 +56,31 @@ class FeatureGenerationAgent:
             logger.warning("GigaChat-генерация упала (%s) — переходим на fallback.", exc)
             train_new, test_new = self._fallback_features(ctx)
 
-        ctx.feature_matrix_train = train_new.reset_index(drop=True)
-        ctx.feature_matrix_test = test_new.reset_index(drop=True)
-        ctx.feature_column_names = list(train_new.columns)
-        logger.info("Итого фичей: %d", len(ctx.feature_column_names))
+        # Объединяем исходные фичи (без target / id) + только-новые колонки
+        exclude = {ctx.target_col, ctx.id_col}
+        orig_cols = [c for c in ctx.train_frame.columns if c not in exclude]
+        existing = set(orig_cols)
+
+        train_orig = ctx.train_frame[orig_cols].reset_index(drop=True)
+        test_orig = ctx.test_frame[
+            [c for c in orig_cols if c in ctx.test_frame.columns]
+        ].reset_index(drop=True)
+
+        new_only_tr = train_new[
+            [c for c in train_new.columns if c not in existing]
+        ].reset_index(drop=True)
+        new_only_te = test_new[
+            [c for c in test_new.columns if c not in existing]
+        ].reset_index(drop=True)
+
+        ctx.feature_matrix_train = pd.concat([train_orig, new_only_tr], axis=1)
+        ctx.feature_matrix_test = pd.concat([test_orig, new_only_te], axis=1)
+        ctx.feature_column_names = list(ctx.feature_matrix_train.columns)
+
+        logger.info(
+            "Итого фичей: %d (%d исходных + %d новых).",
+            len(ctx.feature_column_names), len(orig_cols), len(new_only_tr.columns),
+        )
 
     def _call_gigachat_and_exec(
         self, ctx: RunContext
@@ -150,8 +171,10 @@ class FeatureGenerationAgent:
     def _fallback_features(
         self, ctx: RunContext
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Базовые трансформации: log1p, sq, попарные ratio."""
-        logger.info("Fallback: генерируем базовые числовые фичи.")
+        """Базовые трансформации числовых фичей: log1p, sq, попарные ratio.
+        Оригинальные колонки не дублируем — они добавятся в _generate_feature_matrices.
+        """
+        logger.info("Fallback: генерируем базовые числовые трансформации.")
         exclude = {ctx.target_col, ctx.id_col}
         num_cols = [
             c for c in ctx.train_frame.select_dtypes(include="number").columns
@@ -164,11 +187,11 @@ class FeatureGenerationAgent:
         for col in num_cols:
             med = float(ctx.train_frame[col].median())
             t = ctx.train_frame[col].fillna(med)
-            e = ctx.test_frame[col].fillna(med) if col in ctx.test_frame.columns else pd.Series(
-                [med] * len(ctx.test_frame), index=ctx.test_frame.index
+            e = (
+                ctx.test_frame[col].fillna(med)
+                if col in ctx.test_frame.columns
+                else pd.Series([med] * len(ctx.test_frame), index=ctx.test_frame.index)
             )
-            feats_tr[col] = t
-            feats_te[col] = e
             if t.min() >= 0:
                 feats_tr[f"log1p_{col}"] = np.log1p(t)
                 feats_te[f"log1p_{col}"] = np.log1p(e)
@@ -180,13 +203,20 @@ class FeatureGenerationAgent:
                 med_j = float(ctx.train_frame[cj].median())
                 med_i = float(ctx.train_frame[ci].median())
                 denom_t = ctx.train_frame[cj].fillna(med_j).replace(0, np.nan)
-                denom_e = ctx.test_frame[cj].fillna(med_j).replace(0, np.nan) if cj in ctx.test_frame.columns else pd.Series(
-                    [np.nan] * len(ctx.test_frame), index=ctx.test_frame.index
+                denom_e = (
+                    ctx.test_frame[cj].fillna(med_j).replace(0, np.nan)
+                    if cj in ctx.test_frame.columns
+                    else pd.Series([np.nan] * len(ctx.test_frame), index=ctx.test_frame.index)
                 )
-                feats_tr[f"ratio_{ci}_div_{cj}"] = (ctx.train_frame[ci].fillna(med_i) / denom_t).fillna(0)
+                feats_tr[f"ratio_{ci}_div_{cj}"] = (
+                    ctx.train_frame[ci].fillna(med_i) / denom_t
+                ).fillna(0)
                 feats_te[f"ratio_{ci}_div_{cj}"] = (
-                    (ctx.test_frame[ci].fillna(med_i) if ci in ctx.test_frame.columns
-                     else pd.Series([med_i] * len(ctx.test_frame), index=ctx.test_frame.index))
+                    (
+                        ctx.test_frame[ci].fillna(med_i)
+                        if ci in ctx.test_frame.columns
+                        else pd.Series([med_i] * len(ctx.test_frame), index=ctx.test_frame.index)
+                    )
                     / denom_e
                 ).fillna(0)
 
