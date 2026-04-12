@@ -1,4 +1,4 @@
-"""Тулы агента вывода: сохранение train/test в output/."""
+﻿"""Тулы агента вывода: сохранение train/test в output/."""
 from __future__ import annotations
 
 import re
@@ -15,6 +15,26 @@ def _to_ascii_col(name: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_]", "_", ascii_only)
     cleaned = re.sub(r"_+", "_", cleaned).strip("_")
     return cleaned or "feat"
+
+
+def _rename_ascii_pair(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Переименовывает колонки train/test по одному общему ASCII-mapping."""
+    ordered_cols = list(train.columns) + [c for c in test.columns if c not in train.columns]
+    used: set[str] = set()
+    mapping: dict[str, str] = {}
+    for col in ordered_cols:
+        base = _to_ascii_col(col)
+        candidate = base
+        i = 1
+        while candidate in used:
+            candidate = f"{base}_{i}"
+            i += 1
+        used.add(candidate)
+        mapping[col] = candidate
+    return train.rename(columns=mapping), test.rename(columns=mapping)
 
 
 def ensure_output_dir(output_dir: Path) -> None:
@@ -60,10 +80,7 @@ def save_submission(
 
     # Приводим имена колонок к ASCII — scoring.py читает CSV без явной кодировки,
     # и CatBoost C++ падает с UnicodeDecodeError на кириллических именах
-    ascii_cols_train = {c: _to_ascii_col(c) for c in train.columns}
-    ascii_cols_test  = {c: _to_ascii_col(c) for c in test.columns}
-    train = train.rename(columns=ascii_cols_train)
-    test  = test.rename(columns=ascii_cols_test)
+    train, test = _rename_ascii_pair(train, test)
 
     train_path = output_dir / "train.csv"
     test_path  = output_dir / "test.csv"

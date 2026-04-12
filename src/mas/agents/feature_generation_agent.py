@@ -19,7 +19,7 @@ import pandas as pd
 
 from src.mas.context import RunContext
 from src.mas.llm import chat_logged, gigachat_client
-from src.mas.metrics import compute_metric_m_matrix, compute_metric_n_vector
+from src.mas.metrics import compute_metric_m_matrix
 from src.mas.prompts import (
     FEATURE_GENERATION_SYSTEM,
     build_feature_generation_prompt,
@@ -70,6 +70,26 @@ def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
             logger.info("Переименованы не-ASCII колонки: %s", mapping)
         df = df.rename(columns=dict(zip(df.columns, new_names)))
     return df
+
+
+def _sanitize_columns_pair(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Переименовывает колонки train/test по одному и тому же mapping.
+
+    Это важно при ASCII-нормализации: если делать rename отдельно,
+    одинаковая исходная колонка может получить разные имена из-за коллизий.
+    """
+    ordered_cols: list[str] = list(train_df.columns) + [
+        c for c in test_df.columns if c not in train_df.columns
+    ]
+    seen: set = set()
+    mapping = {col: _ascii_col_name(col, seen) for col in ordered_cols}
+    changed = {old: new for old, new in mapping.items() if old != new}
+    if changed:
+        logger.info("Переименованы не-ASCII/конфликтующие колонки: %s", changed)
+    return train_df.rename(columns=mapping), test_df.rename(columns=mapping)
 
 
 def _sanitize(df: pd.DataFrame) -> pd.DataFrame:
@@ -149,12 +169,16 @@ class FeatureGenerationAgent:
             .iloc[:n_te]
         )
 
-        ctx.feature_matrix_train = _sanitize_columns(_sanitize(
+        feature_train = _sanitize(
             pd.concat([train_orig, new_only_tr], axis=1).reset_index(drop=True)
-        ))
-        ctx.feature_matrix_test = _sanitize_columns(_sanitize(
+        )
+        feature_test = _sanitize(
             pd.concat([test_orig, new_only_te], axis=1).reset_index(drop=True)
-        ))
+        )
+        ctx.feature_matrix_train, ctx.feature_matrix_test = _sanitize_columns_pair(
+            feature_train,
+            feature_test,
+        )
         # Синхронизируем обе матрицы строго по пересечению колонок.
         # На скрытом датасете новые или исходные признаки могут разъехаться
         # между train/test после exec() или dtype-обработки.
@@ -370,62 +394,17 @@ class FeatureGenerationAgent:
     def _compute_metrics(self, ctx: RunContext) -> None:
         names = list(ctx.feature_column_names)
         if not names or ctx.feature_matrix_train is None or ctx.feature_matrix_train.empty:
-            ctx.metric_n_vector = np.array([], dtype=float)
             ctx.metric_m_matrix = np.zeros((0, 0), dtype=float)
-            ctx.metric_n_results = {}
-            ctx.feature_n_unique = {}
             return
 
         X = ctx.feature_matrix_train
-
-        # Передаём таргет чтобы metric_n рассчитала реальную примесь
-        target_series: pd.Series | None = None
-        if ctx.target_col and ctx.train_frame is not None and ctx.target_col in ctx.train_frame.columns:
-            target_series = ctx.train_frame[ctx.target_col].reset_index(drop=True)
-
-        context_dict = {"target": target_series} if target_series is not None else None
-        ctx.metric_n_vector = compute_metric_n_vector(X, names, context=context_dict)
-        ctx.metric_m_matrix = compute_metric_m_matrix(X, names, context=context_dict)
-        ctx.feature_n_unique = {
-            name: int(X[name].nunique(dropna=False))
-            for name in names
-            if name in X.columns
-        }
-
-        # Именованный словарь {фича: score} для промпта агента 3
-        ctx.metric_n_results = {
-            name: float(score)
-            for name, score in zip(names, ctx.metric_n_vector)
-        }
-
-        # Логируем все значения, отсортированные от лучшего (меньше = лучше)
-        logger.info(
-            "Метрика N рассчитана для %d признаков (target='%s'). "
-            "Отбор/ранжирование ведём по n_unique, при равенстве доп. сигнал — metric_n.",
-            len(ctx.metric_n_results), ctx.target_col,
-        )
-        ranked_for_log = sorted(
-            ctx.metric_n_results.items(),
-            key=lambda kv: (
-                -(ctx.feature_n_unique.get(kv[0], -1)),
-                kv[1],
-                kv[0],
-            ),
-        )
-        for feat, score in ranked_for_log:
-            logger.info(
-                "  feature  %-45s  n_unique=%-8d  metric_n=%10.2f",
-                feat,
-                ctx.feature_n_unique.get(feat, -1),
-                score,
-            )
+        ctx.metric_m_matrix = compute_metric_m_matrix(X, names, context=None)
 
     def _refresh_selection_prompt(self, ctx: RunContext) -> None:
         excerpt = (ctx.readme_text or "")[:4000]
         ctx.selection_prompt = build_feature_selection_prompt(
             readme_excerpt=excerpt,
             feature_names=list(ctx.feature_column_names),
-            metric_n_vector=ctx.metric_n_vector if ctx.metric_n_vector is not None else np.array([]),
             metric_m_matrix=ctx.metric_m_matrix if ctx.metric_m_matrix is not None else np.zeros((0, 0)),
             extra_hints=ctx.schema_notes,
         )

@@ -56,13 +56,7 @@ class RunContext:
     """Сгенерированные признаки для train (только новые колонки или полный блок — на ваш выбор)."""
     feature_matrix_test: pd.DataFrame | None = None
     feature_column_names: list[str] = field(default_factory=list)
-    """Порядок имён фичей; совпадает с осями metric_n_vector и metric_m_matrix."""
-    metric_n_vector: np.ndarray | None = None
-    """Длина n: metric_n(feature_i) для каждой фичи."""
-    metric_n_results: dict[str, float] = field(default_factory=dict)
-    """Словарь {имя_фичи: metric_n} — передаётся в промпт агента 3."""
-    feature_n_unique: dict[str, int] = field(default_factory=dict)
-    """Словарь {имя_фичи: n_unique} — используется при отборе и в логах."""
+    """Порядок имён фичей; совпадает с осями metric_m_matrix."""
     metric_m_matrix: np.ndarray | None = None
     """Матрица n×n: metric_m(feature_i, feature_j) в ячейке (i, j)."""
     selection_prompt: str = ""

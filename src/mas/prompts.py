@@ -157,19 +157,14 @@ def build_feature_selection_llm_prompt(
     readme: str,
     available_features: list[str],
     original_eda_report: str = "",
-    metric_n_results: dict[str, float] | None = None,
-    feature_n_unique: dict[str, int] | None = None,
 ) -> str:
     """User-часть промпта агента 3 (system — FEATURE_SELECTION_SYSTEM).
 
-    Передаёт три блока данных:
+    Передаёт два блока данных:
     - original_eda_report: полный EDA исходных признаков от агента 1
       (статистика + текстовое описание связи с таргетом по каждому признаку).
     - features_eda_report: EDA финальных кандидатов с CatBoost importance
       (исходные + сгенерированные, от агента 3).
-    - metric_n_results: словарь {признак: metric_n} — примесь двухуровневого дерева.
-    - feature_n_unique: словарь {признак: n_unique}. Основной сигнал для отбора:
-      сначала смотри на n_unique, затем при близких значениях — на metric_n и importance.
     """
     readme_block = (readme.strip() or "(описание отсутствует)")[:1500]
     feats_str = ", ".join(f"'{f}'" for f in available_features)
@@ -181,37 +176,13 @@ def build_feature_selection_llm_prompt(
             f"{original_eda_report[:5000]}\n\n"
         )
 
-    metric_n_block = ""
-    if metric_n_results:
-        rows = "\n".join(
-            f"  {name}: {score:.4f}"
-            for name, score in sorted(metric_n_results.items(), key=lambda kv: kv[1])
-        )
-        metric_n_block = (
-            "### Метрика N (примесь двухуровневого дерева; НИЖЕ = лучше разделяет классы):\n"
-            f"{rows}\n\n"
-        )
-
-    n_unique_block = ""
-    if feature_n_unique:
-        rows = "\n".join(
-            f"  {name}: {count}"
-            for name, count in sorted(feature_n_unique.items(), key=lambda kv: (-kv[1], kv[0]))
-        )
-        n_unique_block = (
-            "### n_unique по кандидатам (ОСНОВНОЙ критерий отбора; БОЛЬШЕ = лучше):\n"
-            f"{rows}\n\n"
-        )
-
     return (
         f"### Описание задачи (readme):\n{readme_block}\n\n"
         f"### Список признаков-кандидатов:\n{feats_str}\n\n"
         f"{orig_block}"
-        f"{n_unique_block}"
-        f"{metric_n_block}"
         f"### EDA по ФИНАЛЬНЫМ кандидатам (исходные + сгенерированные; CatBoost importance, corr_target):\n"
         f"{features_eda_report}\n\n"
-        "Выбери 5 лучших признаков. Сначала ориентируйся на n_unique, затем на metric_n и CatBoost importance. Верни JSON-массив."
+        "Выбери 5 лучших признаков. Верни JSON-массив."
     )
 
 
@@ -223,14 +194,12 @@ def build_feature_selection_prompt(
     *,
     readme_excerpt: str,
     feature_names: list[str],
-    metric_n_vector: np.ndarray,
     metric_m_matrix: np.ndarray,
     extra_hints: str = "",
 ) -> str:
     _ = readme_excerpt, extra_hints
     lines = [
         "Имена фичей:", ", ".join(feature_names) if feature_names else "(пусто)", "",
-        "Метрика n:", np.array2string(metric_n_vector, precision=4) if metric_n_vector is not None else "—", "",
         "Матрица m:", np.array2string(metric_m_matrix, precision=4) if metric_m_matrix is not None else "—",
     ]
     return "\n".join(lines)
