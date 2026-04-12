@@ -1,4 +1,4 @@
-"""Агент 2: генерация новых фичей через GigaChat.
+﻿"""Агент 2: генерация новых фичей через GigaChat.
 
 Поток:
 1. Собирает промпт из ctx.eda_report + ctx.readme_text + советов по CatBoost.
@@ -354,10 +354,53 @@ class FeatureGenerationAgent:
         if not names or ctx.feature_matrix_train is None or ctx.feature_matrix_train.empty:
             ctx.metric_n_vector = np.array([], dtype=float)
             ctx.metric_m_matrix = np.zeros((0, 0), dtype=float)
+            ctx.metric_n_results = {}
+            ctx.feature_n_unique = {}
             return
+
         X = ctx.feature_matrix_train
-        ctx.metric_n_vector = compute_metric_n_vector(X, names, context=None)
-        ctx.metric_m_matrix = compute_metric_m_matrix(X, names, context=None)
+
+        # Передаём таргет чтобы metric_n рассчитала реальную примесь
+        target_series: pd.Series | None = None
+        if ctx.target_col and ctx.train_frame is not None and ctx.target_col in ctx.train_frame.columns:
+            target_series = ctx.train_frame[ctx.target_col].reset_index(drop=True)
+
+        context_dict = {"target": target_series} if target_series is not None else None
+        ctx.metric_n_vector = compute_metric_n_vector(X, names, context=context_dict)
+        ctx.metric_m_matrix = compute_metric_m_matrix(X, names, context=context_dict)
+        ctx.feature_n_unique = {
+            name: int(X[name].nunique(dropna=False))
+            for name in names
+            if name in X.columns
+        }
+
+        # Именованный словарь {фича: score} для промпта агента 3
+        ctx.metric_n_results = {
+            name: float(score)
+            for name, score in zip(names, ctx.metric_n_vector)
+        }
+
+        # Логируем все значения, отсортированные от лучшего (меньше = лучше)
+        logger.info(
+            "Метрика N рассчитана для %d признаков (target='%s'). "
+            "Отбор/ранжирование ведём по n_unique, при равенстве доп. сигнал — metric_n.",
+            len(ctx.metric_n_results), ctx.target_col,
+        )
+        ranked_for_log = sorted(
+            ctx.metric_n_results.items(),
+            key=lambda kv: (
+                -(ctx.feature_n_unique.get(kv[0], -1)),
+                kv[1],
+                kv[0],
+            ),
+        )
+        for feat, score in ranked_for_log:
+            logger.info(
+                "  feature  %-45s  n_unique=%-8d  metric_n=%10.2f",
+                feat,
+                ctx.feature_n_unique.get(feat, -1),
+                score,
+            )
 
     def _refresh_selection_prompt(self, ctx: RunContext) -> None:
         excerpt = (ctx.readme_text or "")[:4000]

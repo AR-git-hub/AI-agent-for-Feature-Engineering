@@ -26,7 +26,10 @@ MAX_FEATURES = 5
 def build_train_output(ctx: RunContext) -> pd.DataFrame:
     """
     Собрать output/train.csv для CatBoost:
-    [id_col, target_col, feat_1, …, feat_k].
+    все исходные колонки data/train.csv + сгенерированные фичи.
+
+    check_submission.py требует присутствия ВСЕХ колонок из data/train.csv.
+    Фичи — это всё что не входит в исходный набор колонок.
     """
     if ctx.train_frame is None or ctx.feature_matrix_train is None:
         logger.error("build_train_output: train_frame или feature_matrix_train отсутствует")
@@ -37,13 +40,17 @@ def build_train_output(ctx: RunContext) -> pd.DataFrame:
         if c in ctx.feature_matrix_train.columns
     ][:MAX_FEATURES]
 
+    # Берём все исходные колонки из data/train.csv, которые есть в train_frame
+    reserved = ctx.input_train_cols or (
+        [c for c in (ctx.id_col, ctx.target_col) if c]
+    )
+    base_cols = [c for c in reserved if c in ctx.train_frame.columns]
+
     parts: list[pd.DataFrame] = []
-    if ctx.id_col and ctx.id_col in ctx.train_frame.columns:
-        parts.append(ctx.train_frame[[ctx.id_col]])
-    if ctx.target_col and ctx.target_col in ctx.train_frame.columns:
-        parts.append(ctx.train_frame[[ctx.target_col]])
+    if base_cols:
+        parts.append(ctx.train_frame[base_cols].reset_index(drop=True))
     if feat_cols:
-        parts.append(ctx.feature_matrix_train[feat_cols])
+        parts.append(ctx.feature_matrix_train[feat_cols].reset_index(drop=True))
 
     if not parts:
         return pd.DataFrame()
@@ -54,7 +61,9 @@ def build_train_output(ctx: RunContext) -> pd.DataFrame:
 def build_test_output(ctx: RunContext) -> pd.DataFrame:
     """
     Собрать output/test.csv для CatBoost:
-    [id_col, feat_1, …, feat_k] — те же фичи, что в train, без таргета.
+    все исходные колонки data/test.csv + сгенерированные фичи (без таргета).
+
+    check_submission.py требует присутствия ВСЕХ колонок из data/test.csv.
     """
     if ctx.test_frame is None or ctx.feature_matrix_test is None:
         logger.error("build_test_output: test_frame или feature_matrix_test отсутствует")
@@ -65,11 +74,17 @@ def build_test_output(ctx: RunContext) -> pd.DataFrame:
         if c in ctx.feature_matrix_test.columns
     ][:MAX_FEATURES]
 
+    # Берём все исходные колонки из data/test.csv, которые есть в test_frame
+    reserved = ctx.input_test_cols or (
+        [ctx.id_col] if ctx.id_col else []
+    )
+    base_cols = [c for c in reserved if c in ctx.test_frame.columns]
+
     parts: list[pd.DataFrame] = []
-    if ctx.id_col and ctx.id_col in ctx.test_frame.columns:
-        parts.append(ctx.test_frame[[ctx.id_col]])
+    if base_cols:
+        parts.append(ctx.test_frame[base_cols].reset_index(drop=True))
     if feat_cols:
-        parts.append(ctx.feature_matrix_test[feat_cols])
+        parts.append(ctx.feature_matrix_test[feat_cols].reset_index(drop=True))
 
     if not parts:
         return pd.DataFrame()
@@ -127,10 +142,12 @@ class AnswerAgent:
         ctx.test_features = test
 
         if not train.empty and not test.empty:
+            reserved = set(ctx.input_train_cols) | set(ctx.input_test_cols)
             output_tools.save_submission(
                 ctx.output_dir, train, test,
                 id_col=ctx.id_col,
                 target_col=ctx.target_col,
+                reserved_cols=reserved or None,
             )
             logger.info(
                 "Сохранено: output/train.csv %s, output/test.csv %s",

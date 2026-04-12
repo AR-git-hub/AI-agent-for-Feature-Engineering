@@ -54,6 +54,12 @@ class DatasetAgent:
             ctx.tables[name] = self._drop_unnamed_index_cols(df)
         logger.info("Загружено таблиц: %d", len(ctx.tables))
 
+        # Запоминаем исходные колонки — check_submission требует их в output/
+        if "train.csv" in ctx.tables:
+            ctx.input_train_cols = list(ctx.tables["train.csv"].columns)
+        if "test.csv" in ctx.tables:
+            ctx.input_test_cols = list(ctx.tables["test.csv"].columns)
+
     @staticmethod
     def _drop_unnamed_index_cols(df: pd.DataFrame) -> pd.DataFrame:
         """Удаляет колонки вида 'Unnamed: N' — артефакт сохранения CSV с индексом."""
@@ -113,16 +119,28 @@ class DatasetAgent:
             rk = spec.get("right_key", lk)
             how = spec.get("how", "left")
 
-            result_train = f"train_merged_{rt}"
-            result_test = f"test_merged_{rt}"
+            if not rt or not lk:
+                logger.warning("Пропускаем неполный мерж-spec: %s", spec)
+                continue
 
-            ctx.merge_reports.append(
-                data_tools.request_merge(train_name, rt, lk, rk, how, result_train)
-            )
-            ctx.merge_reports.append(
-                data_tools.request_merge(test_name, rt, lk, rk, how, result_test)
-            )
-            train_name, test_name = result_train, result_test
+            result_train = f"train_merged_{rt}"
+            result_test  = f"test_merged_{rt}"
+
+            rep_tr = data_tools.request_merge(train_name, rt, lk, rk, how, result_train)
+            rep_te = data_tools.request_merge(test_name,  rt, lk, rk, how, result_test)
+            ctx.merge_reports.extend([rep_tr, rep_te])
+
+            # Обновляем цепочку только если оба мержа зарегистрировали результат
+            tr_ok = "error" not in json.loads(rep_tr)
+            te_ok = "error" not in json.loads(rep_te)
+            if tr_ok and te_ok:
+                train_name, test_name = result_train, result_test
+            else:
+                logger.warning(
+                    "Мерж с '%s' не удался (train_ok=%s, test_ok=%s) — "
+                    "продолжаем со старым train_name='%s'.",
+                    rt, tr_ok, te_ok, train_name,
+                )
 
         train = data_tools._load_table(train_name)
         test = data_tools._load_table(test_name)

@@ -25,7 +25,7 @@ MERGE_PLANNING_SYSTEM = """Ты опытный дата-инженер. Тебе
 ```
 
 Правила:
-- Верни краткое И ОЧЕНЬ ИНФОРМАТИВНОЕ текстовое описание каждой фичи и твои мысли по поводу потенциальной связи с таргетом (в условиях обучения catboost для бинарной классификации).
+- Верни краткое, НО ОЧЕНЬ ИНФОРМАТИВНОЕ текстовое описание каждой фичи (и посчитать какие-нибудь полезные метрики для catboost) и твои мысли по поводу потенциальной связи с таргетом (в условиях обучения catboost).
 - "how" всегда "left" если нет весомых причин иначе.
 - Если таблица не связана с train/test — не включай её.
 - Ключи должны быть точными именами колонок из схем.
@@ -134,6 +134,7 @@ FEATURE_SELECTION_SYSTEM = """Ты эксперт по отбору призна
 Твоя задача (ОЧЕНЬ ВАЖНО!) — делай особый акцент на изначальных признаках, но если видишь ОЧЕНЬ хороший признак, то возьми его. 
 
 Критерии хорошего признака для CatBoost:
+- Высокая метрика N (примесь двухуровневого дерева; НИЖЕ = лучше разделяет классы). ВАЖНО!!!
 - Высокая CatBoost importance (главный сигнал).
 - Сильная связь с таргетом (mutual info, target rate spread по категориям).
 - Осмысленность: признак должен иметь предметный смысл, без абсурдных комбинаций.
@@ -156,33 +157,61 @@ def build_feature_selection_llm_prompt(
     readme: str,
     available_features: list[str],
     original_eda_report: str = "",
+    metric_n_results: dict[str, float] | None = None,
+    feature_n_unique: dict[str, int] | None = None,
 ) -> str:
     """User-часть промпта агента 3 (system — FEATURE_SELECTION_SYSTEM).
 
-    Передаёт два блока EDA:
+    Передаёт три блока данных:
     - original_eda_report: полный EDA исходных признаков от агента 1
       (статистика + текстовое описание связи с таргетом по каждому признаку).
     - features_eda_report: EDA финальных кандидатов с CatBoost importance
       (исходные + сгенерированные, от агента 3).
+    - metric_n_results: словарь {признак: metric_n} — примесь двухуровневого дерева.
+    - feature_n_unique: словарь {признак: n_unique}. Основной сигнал для отбора:
+      сначала смотри на n_unique, затем при близких значениях — на metric_n и importance.
     """
     readme_block = (readme.strip() or "(описание отсутствует)")[:1500]
     feats_str = ", ".join(f"'{f}'" for f in available_features)
 
     orig_block = ""
     if original_eda_report.strip():
-        # Обрезаем до разумного размера — оригинальных фичей может быть много
         orig_block = (
             f"### EDA по ИСХОДНЫМ признакам датасета (статистика + анализ):\n"
             f"{original_eda_report[:5000]}\n\n"
+        )
+
+    metric_n_block = ""
+    if metric_n_results:
+        rows = "\n".join(
+            f"  {name}: {score:.4f}"
+            for name, score in sorted(metric_n_results.items(), key=lambda kv: kv[1])
+        )
+        metric_n_block = (
+            "### Метрика N (примесь двухуровневого дерева; НИЖЕ = лучше разделяет классы):\n"
+            f"{rows}\n\n"
+        )
+
+    n_unique_block = ""
+    if feature_n_unique:
+        rows = "\n".join(
+            f"  {name}: {count}"
+            for name, count in sorted(feature_n_unique.items(), key=lambda kv: (-kv[1], kv[0]))
+        )
+        n_unique_block = (
+            "### n_unique по кандидатам (ОСНОВНОЙ критерий отбора; БОЛЬШЕ = лучше):\n"
+            f"{rows}\n\n"
         )
 
     return (
         f"### Описание задачи (readme):\n{readme_block}\n\n"
         f"### Список признаков-кандидатов:\n{feats_str}\n\n"
         f"{orig_block}"
+        f"{n_unique_block}"
+        f"{metric_n_block}"
         f"### EDA по ФИНАЛЬНЫМ кандидатам (исходные + сгенерированные; CatBoost importance, corr_target):\n"
         f"{features_eda_report}\n\n"
-        "Выбери 5 лучших признаков. Верни JSON-массив."
+        "Выбери 5 лучших признаков. Сначала ориентируйся на n_unique, затем на metric_n и CatBoost importance. Верни JSON-массив."
     )
 
 

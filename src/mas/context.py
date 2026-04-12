@@ -1,4 +1,4 @@
-"""Общий контекст прогона, который передаётся между агентами."""
+﻿"""Общий контекст прогона, который передаётся между агентами."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -27,6 +27,10 @@ class RunContext:
 
     # --- Агент 1: датасет ---
     readme_text: str = ""
+    input_train_cols: list[str] = field(default_factory=list)
+    """Исходные колонки data/train.csv — обязательны в output/train.csv."""
+    input_test_cols: list[str] = field(default_factory=list)
+    """Исходные колонки data/test.csv — обязательны в output/test.csv."""
     tables: dict[str, pd.DataFrame] = field(default_factory=dict)
     schema_notes: str = ""
     """Черновые заметки о ключах/джойнах (LLM или эвристики)."""
@@ -55,6 +59,10 @@ class RunContext:
     """Порядок имён фичей; совпадает с осями metric_n_vector и metric_m_matrix."""
     metric_n_vector: np.ndarray | None = None
     """Длина n: metric_n(feature_i) для каждой фичи."""
+    metric_n_results: dict[str, float] = field(default_factory=dict)
+    """Словарь {имя_фичи: metric_n} — передаётся в промпт агента 3."""
+    feature_n_unique: dict[str, int] = field(default_factory=dict)
+    """Словарь {имя_фичи: n_unique} — используется при отборе и в логах."""
     metric_m_matrix: np.ndarray | None = None
     """Матрица n×n: metric_m(feature_i, feature_j) в ячейке (i, j)."""
     selection_prompt: str = ""

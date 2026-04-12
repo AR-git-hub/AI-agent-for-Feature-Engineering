@@ -23,19 +23,16 @@ def ensure_output_dir(output_dir: Path) -> None:
 
 def _encode_non_numeric(
     df: pd.DataFrame,
-    id_col: str | None,
-    target_col: str | None,
+    reserved_cols: set[str],
 ) -> pd.DataFrame:
     """Кодирует нечисловые *признаки* в Categorical int-коды.
 
-    id и target не трогаем — они могут быть строкой/числом по замыслу.
-    Это гарантирует, что scoring.py получит только числовые фичи и не упадёт
-    при sklearn-валидации внутри CatBoost / StratifiedKFold.
+    reserved_cols — колонки которые не трогаем (id, target и все исходные).
+    Гарантирует, что scoring.py получит только числовые фичи.
     """
     df = df.copy()
-    skip = {col for col in (id_col, target_col) if col}
     for col in df.columns:
-        if col in skip:
+        if col in reserved_cols:
             continue
         if not pd.api.types.is_numeric_dtype(df[col]):
             df[col] = pd.Categorical(
@@ -51,10 +48,15 @@ def save_submission(
     *,
     id_col: str | None = None,
     target_col: str | None = None,
+    reserved_cols: set[str] | None = None,
 ) -> tuple[Path, Path]:
     ensure_output_dir(output_dir)
-    train = _encode_non_numeric(train, id_col, target_col)
-    test = _encode_non_numeric(test, id_col, target_col)
+    # reserved = переданный набор ИЛИ минимальный из id+target
+    _reserved = reserved_cols if reserved_cols is not None else {
+        col for col in (id_col, target_col) if col
+    }
+    train = _encode_non_numeric(train, _reserved)
+    test  = _encode_non_numeric(test,  _reserved)
 
     # Приводим имена колонок к ASCII — scoring.py читает CSV без явной кодировки,
     # и CatBoost C++ падает с UnicodeDecodeError на кириллических именах
@@ -64,7 +66,13 @@ def save_submission(
     test  = test.rename(columns=ascii_cols_test)
 
     train_path = output_dir / "train.csv"
-    test_path = output_dir / "test.csv"
-    train.to_csv(train_path, index=False, encoding="utf-8")
-    test.to_csv(test_path, index=False, encoding="utf-8")
+    test_path  = output_dir / "test.csv"
+
+    # Явный open(str(...)) обходит баг pandas на Windows,
+    # где Path-объект в to_csv вызывает OSError [Errno 22] Invalid argument.
+    with open(str(train_path), "w", encoding="utf-8", newline="") as fh:
+        train.to_csv(fh, index=False)
+    with open(str(test_path), "w", encoding="utf-8", newline="") as fh:
+        test.to_csv(fh, index=False)
+
     return train_path, test_path

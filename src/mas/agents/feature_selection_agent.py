@@ -1,4 +1,4 @@
-"""Агент 3: отбор признаков для CatBoost через GigaChat.
+﻿"""Агент 3: отбор признаков для CatBoost через GigaChat.
 
 Поток:
 1. Быстрый CatBoost (150 итераций) -> importance каждой фичи.
@@ -58,6 +58,17 @@ class FeatureSelectionAgent:
             ctx.selected_feature_names = []
             return ctx
 
+        # Предварительный отбор по n_unique: выкидываем константные признаки.
+        valid_cols = [
+            c for c in valid_cols
+            if ctx.feature_n_unique.get(c, 0) > 1
+        ]
+        if not valid_cols:
+            logger.warning("После фильтра по n_unique>1 валидных колонок не осталось.")
+            ctx.selection_notes = "Нечего отбирать: все признаки константные по n_unique."
+            ctx.selected_feature_names = []
+            return ctx
+
         X = ctx.feature_matrix_train[valid_cols].reset_index(drop=True)
         y = _coerce_y(ctx.train_frame[ctx.target_col]).reset_index(drop=True)
 
@@ -66,15 +77,19 @@ class FeatureSelectionAgent:
         logger.info("CatBoost importance рассчитан по %d фичам.", len(importance))
 
         # Шаг 2 — EDA-отчёт с importance -> ctx.features_eda_report
-        ctx.features_eda_report = self._build_features_eda_report(X, y, importance)
+        ctx.features_eda_report = self._build_features_eda_report(
+            X, y, importance, ctx.feature_n_unique
+        )
 
         # Шаг 3 — GigaChat выбирает фичи
         selected = self._select_with_gigachat(ctx, valid_cols)
 
         # Шаг 4 — fallback
         if not selected:
-            logger.warning("GigaChat не выбрал фичи — fallback: топ-%d по importance.", MAX_FEATURES)
-            selected = importance.head(MAX_FEATURES).index.tolist()
+            logger.warning(
+                "GigaChat не выбрал фичи — fallback: отбор по n_unique, затем importance, затем metric_n."
+            )
+            selected = self._fallback_select(ctx, importance, valid_cols)
 
         ctx.selected_feature_names = selected[:MAX_FEATURES]
         ctx.selection_notes = (
@@ -149,6 +164,7 @@ class FeatureSelectionAgent:
         X: pd.DataFrame,
         y: pd.Series,
         importance: pd.Series,
+        feature_n_unique: dict[str, int] | None = None,
     ) -> str:
         """Строка на фичу: null%, mean/std/skew (числовые), corr_target, importance.
         Сортировка по убыванию importance.
@@ -172,13 +188,15 @@ class FeatureSelectionAgent:
                 valid = s.dropna()
                 lines.append(
                     f"  {col}  null={s.isna().mean():.1%}"
+                    f"  n_unique={feature_n_unique.get(col, s.nunique(dropna=False)) if feature_n_unique else s.nunique(dropna=False)}"
                     f"  mean={valid.mean():.4g}  std={valid.std():.4g}"
                     f"  skew={valid.skew():.2f}{corr_str}  importance={imp:.2f}"
                 )
             else:
                 lines.append(
                     f"  {col}  [categ]  null={s.isna().mean():.1%}"
-                    f"  unique={s.nunique()}{corr_str}  importance={imp:.2f}"
+                    f"  n_unique={feature_n_unique.get(col, s.nunique(dropna=False)) if feature_n_unique else s.nunique(dropna=False)}"
+                    f"{corr_str}  importance={imp:.2f}"
                 )
         return "\n".join(lines)
 
@@ -192,6 +210,8 @@ class FeatureSelectionAgent:
             readme=ctx.readme_text,
             available_features=valid_cols,
             original_eda_report=ctx.eda_report,
+            metric_n_results=ctx.metric_n_results or None,
+            feature_n_unique=ctx.feature_n_unique or None,
         )
         payload = Chat(
             messages=[
@@ -233,3 +253,21 @@ class FeatureSelectionAgent:
 
         logger.warning("Не удалось распарсить фичи из ответа GigaChat:\n%s", content[:300])
         return []
+
+    @staticmethod
+    def _fallback_select(
+        ctx: RunContext,
+        importance: pd.Series,
+        valid_cols: list[str],
+    ) -> list[str]:
+        """Жёсткий fallback: сначала n_unique, потом importance, потом metric_n."""
+        ranked = sorted(
+            valid_cols,
+            key=lambda col: (
+                -ctx.feature_n_unique.get(col, -1),
+                -float(importance.get(col, 0.0)),
+                float(ctx.metric_n_results.get(col, float("inf"))),
+                col,
+            ),
+        )
+        return ranked[:MAX_FEATURES]
