@@ -1,4 +1,4 @@
-"""GigaChat: клиент и вызовы с логированием ответа и размышлений (reasoning_content)."""
+﻿"""GigaChat: клиент и вызовы с логированием ответа и размышлений (reasoning_content)."""
 from __future__ import annotations
 
 import logging
@@ -60,7 +60,7 @@ def log_chat_completion(completion: ChatCompletion, label: str = "") -> None:
             logger.info("%schoice=%s reasoning:\n%s", prefix, i, reasoning)
         else:
             logger.info("%schoice=%s reasoning: (нет)", prefix, i)
-        preview = content if len(content) <= 8000 else content[:8000] + "\n… [обрезано]"
+        preview = content if len(content) <= 8000 else content[:8000] + "\n... [обрезано]"
         logger.info("%schoice=%s content:\n%s", prefix, i, preview or "(пусто)")
     try:
         logger.info("%susage: %s", prefix, completion.usage)

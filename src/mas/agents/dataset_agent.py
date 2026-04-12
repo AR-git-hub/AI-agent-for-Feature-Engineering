@@ -1,4 +1,4 @@
-"""Агент 1: сборка датасета.
+﻿"""Агент 1: сборка датасета.
 
 Поток:
 1. Загружаем все CSV из data/.
@@ -305,6 +305,7 @@ class DatasetAgent:
             return
 
         df, target = ctx.train_frame, ctx.target_col
+        y_num = self._coerce_y(df[target]) if target and target in df.columns else None
         lines: list[str] = [f"=== EDA Report: train {df.shape} ==="]
 
         if target and target in df.columns:
@@ -323,9 +324,9 @@ class DatasetAgent:
             valid = s.dropna()
             corr_val: float | None = None
             corr_str = ""
-            if target and target in df.columns and len(valid) > 1:
+            if y_num is not None and len(valid) > 1:
                 try:
-                    corr_val = float(valid.corr(df.loc[valid.index, target]))
+                    corr_val = float(valid.corr(y_num.loc[valid.index]))
                     corr_str = f" corr_target={corr_val:+.3f}"
                 except Exception:
                     pass
@@ -336,7 +337,7 @@ class DatasetAgent:
                 f" skew={valid.skew():.2f}{corr_str}"
             )
             analysis = self._analyze_feature_text(col, s, corr_val, is_numeric=True)
-            lines.append(f"    → {analysis}")
+            lines.append(f"    -> {analysis}")
 
         if cat_cols:
             lines.append("\nCATEGORICAL FEATURES:")
@@ -348,8 +349,8 @@ class DatasetAgent:
             # Для категориальных считаем target-rate по группам
             corr_val = None
             analysis = self._analyze_feature_text(col, s, corr_val, is_numeric=False,
-                                                   df=df, target=target)
-            lines.append(f"    → {analysis}")
+                                                   y_num=y_num)
+            lines.append(f"    -> {analysis}")
 
         ctx.eda_report = "\n".join(lines)
         logger.info("EDA-отчёт построен (%d строк).", len(lines))
@@ -360,8 +361,7 @@ class DatasetAgent:
         s: pd.Series,
         corr: float | None,
         is_numeric: bool,
-        df: pd.DataFrame | None = None,
-        target: str | None = None,
+        y_num: pd.Series | None = None,
     ) -> str:
         """Генерирует краткий текстовый анализ признака и его связи с таргетом."""
         parts: list[str] = []
@@ -420,9 +420,10 @@ class DatasetAgent:
                 parts.append(f"Пропуски {null_pct:.0%} — заполнено модой")
 
             # Если есть данные о target, считаем разброс target rate по группам
-            if df is not None and target and target in df.columns:
+            if y_num is not None:
                 try:
-                    grp = df.groupby(col)[target].mean()
+                    tmp = pd.DataFrame({"__col__": s, "__y__": y_num}).dropna()
+                    grp = tmp.groupby("__col__")["__y__"].mean()
                     spread = float(grp.max() - grp.min())
                     if spread > 0.15:
                         parts.append(
@@ -437,3 +438,10 @@ class DatasetAgent:
                     pass
 
         return "; ".join(parts) if parts else "Нейтральный признак, дополнительный анализ не выявил явной связи с таргетом"
+
+    @staticmethod
+    def _coerce_y(s: pd.Series) -> pd.Series:
+        """Числовой таргет — as-is; строки/категории — Categorical codes (float)."""
+        if pd.api.types.is_numeric_dtype(s):
+            return s.astype(float)
+        return pd.Series(pd.Categorical(s).codes.astype(float), index=s.index)

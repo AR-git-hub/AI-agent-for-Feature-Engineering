@@ -51,6 +51,8 @@ class FeatureSelectionAgent:
         valid_cols = [
             c for c in ctx.feature_column_names
             if c in ctx.feature_matrix_train.columns
+            and ctx.feature_matrix_test is not None
+            and c in ctx.feature_matrix_test.columns
         ]
         if not valid_cols:
             logger.warning("Нет валидных колонок в feature_matrix_train — отбор пропущен.")

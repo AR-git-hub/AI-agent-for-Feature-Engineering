@@ -155,11 +155,29 @@ class FeatureGenerationAgent:
         ctx.feature_matrix_test = _sanitize_columns(_sanitize(
             pd.concat([test_orig, new_only_te], axis=1).reset_index(drop=True)
         ))
-        # Синхронизируем имена: test берёт колонки из train (может не хватать новых)
-        shared = [c for c in ctx.feature_matrix_train.columns
-                  if c in ctx.feature_matrix_test.columns]
-        ctx.feature_matrix_test = ctx.feature_matrix_test[shared]
-        ctx.feature_column_names = list(ctx.feature_matrix_train.columns)
+        # Синхронизируем обе матрицы строго по пересечению колонок.
+        # На скрытом датасете новые или исходные признаки могут разъехаться
+        # между train/test после exec() или dtype-обработки.
+        train_cols = list(ctx.feature_matrix_train.columns)
+        test_cols = list(ctx.feature_matrix_test.columns)
+        shared = [c for c in train_cols if c in ctx.feature_matrix_test.columns]
+        only_train = [c for c in train_cols if c not in ctx.feature_matrix_test.columns]
+        only_test = [c for c in test_cols if c not in ctx.feature_matrix_train.columns]
+
+        if only_train:
+            logger.warning(
+                "Фичи только в train и будут отброшены при выравнивании: %s",
+                only_train[:20],
+            )
+        if only_test:
+            logger.warning(
+                "Фичи только в test и будут отброшены при выравнивании: %s",
+                only_test[:20],
+            )
+
+        ctx.feature_matrix_train = ctx.feature_matrix_train[shared].reset_index(drop=True)
+        ctx.feature_matrix_test = ctx.feature_matrix_test[shared].reset_index(drop=True)
+        ctx.feature_column_names = list(shared)
 
         logger.info(
             "Итого фичей: %d (%d исходных + %d новых).",
