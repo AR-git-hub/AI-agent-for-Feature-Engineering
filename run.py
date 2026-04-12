@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 
 from dotenv import load_dotenv
 
@@ -39,6 +40,12 @@ def run_pipeline():
         logger.info(">>> %s: start", name)
         ctx = agent.run(ctx)
         logger.info("<<< %s: done", name)
+
+    # Удаляем catboost_info и наш временный каталог, чтобы их бинарные tfevents-файлы
+    # не мешали последующему запуску check_submission.py (scoring.py падает на 3-м
+    # fold CV если находит в catboost_info чужой events.out.tfevents).
+    for _cb_dir in ("catboost_info", "output/.cb_imp_tmp"):
+        shutil.rmtree(_cb_dir, ignore_errors=True)
 
     return ctx
 

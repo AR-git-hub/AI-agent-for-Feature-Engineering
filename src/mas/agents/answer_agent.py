@@ -127,7 +127,11 @@ class AnswerAgent:
         ctx.test_features = test
 
         if not train.empty and not test.empty:
-            output_tools.save_submission(ctx.output_dir, train, test)
+            output_tools.save_submission(
+                ctx.output_dir, train, test,
+                id_col=ctx.id_col,
+                target_col=ctx.target_col,
+            )
             logger.info(
                 "Сохранено: output/train.csv %s, output/test.csv %s",
                 train.shape, test.shape,

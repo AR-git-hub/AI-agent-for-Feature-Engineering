@@ -27,6 +27,7 @@ def gigachat_client(**kwargs: Any) -> GigaChat:
         "model": os.environ.get("GIGACHAT_MODEL", DEFAULT_MODEL),
         "verify_ssl_certs": False,  # корпоративный прокси / CORP-среда
         "timeout": 120,             # явный таймаут, чтобы не ждать вечно
+        "temperature": 0.1
     }
     base.update(kwargs)
     return GigaChat(**base)

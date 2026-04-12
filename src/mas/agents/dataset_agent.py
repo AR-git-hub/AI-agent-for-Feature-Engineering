@@ -48,12 +48,20 @@ class DatasetAgent:
         ctx.readme_text = data_tools.read_readme(ctx.data_dir)
         for name in data_tools.list_csv_tables(ctx.data_dir):
             try:
-                ctx.tables[name] = data_tools.load_csv(ctx.data_dir, name)
+                df = data_tools.load_csv(ctx.data_dir, name)
             except Exception:
-                ctx.tables[name] = data_tools.load_csv(
-                    ctx.data_dir, name, sep=None, engine="python"
-                )
+                df = data_tools.load_csv(ctx.data_dir, name, sep=None, engine="python")
+            ctx.tables[name] = self._drop_unnamed_index_cols(df)
         logger.info("Загружено таблиц: %d", len(ctx.tables))
+
+    @staticmethod
+    def _drop_unnamed_index_cols(df: pd.DataFrame) -> pd.DataFrame:
+        """Удаляет колонки вида 'Unnamed: N' — артефакт сохранения CSV с индексом."""
+        unnamed = [c for c in df.columns if str(c).startswith("Unnamed:")]
+        if unnamed:
+            logger.info("Удалены Unnamed-колонки: %s", unnamed)
+            df = df.drop(columns=unnamed)
+        return df
 
     def _run_eda_on_loaded_tables(self, ctx: RunContext) -> None:
         ctx.eda_basic_by_table.clear()

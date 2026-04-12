@@ -5,13 +5,14 @@
 2. Вызывает GigaChat-2-Max (reasoning_effort=high).
 3. Извлекает Python-код из ответа (блок ```python ... ```).
 4. Выполняет код в контролируемом namespace с train_df / test_df.
-5. Собирает новые колонки → ctx.feature_matrix_train / _test.
+5. Объединяет лучшие оригинальные фичи + новые -> ctx.feature_matrix_train / _test.
 6. При ошибке GigaChat или exec — fallback на базовые числовые трансформации.
 """
 from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 
 import numpy as np
 import pandas as pd
@@ -27,8 +28,75 @@ from src.mas.prompts import (
 
 logger = logging.getLogger("mas.agent.feature_gen")
 
-_MAX_PAIR_COLS = 6          # Лимит для попарных фичей в fallback
+_MAX_PAIR_COLS = 6    # лимит для попарных фичей в fallback
+_MAX_ORIG_COLS = 15   # максимум оригинальных колонок в итоговой матрице
 _CODE_BLOCK_RE = re.compile(r"```python\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+
+
+def _ascii_col_name(name: str, seen: set) -> str:
+    """Приводит имя колонки к безопасному ASCII-идентификатору.
+
+    Шаги:
+    1. NFKD-декомпозиция + удаление combining marks (убирает акценты).
+    2. Все не-ASCII символы → '_'.
+    3. Схлопывание множественных '_', удаление крайних '_'.
+    4. Если не начинается с буквы/_ — добавляем 'f_'.
+    5. Дедупликация суффиксом _1, _2, ...
+    """
+    normalized = unicodedata.normalize("NFKD", str(name))
+    ascii_only = normalized.encode("ascii", errors="replace").decode("ascii")
+    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", ascii_only)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    if not cleaned:
+        cleaned = "feat"
+    if not (cleaned[0].isalpha() or cleaned[0] == "_"):
+        cleaned = "f_" + cleaned
+    original = cleaned
+    i = 1
+    while cleaned in seen:
+        cleaned = f"{original}_{i}"
+        i += 1
+    seen.add(cleaned)
+    return cleaned
+
+
+def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Переименовывает все не-ASCII имена колонок в безопасные ASCII-идентификаторы."""
+    seen: set = set()
+    new_names = [_ascii_col_name(c, seen) for c in df.columns]
+    if new_names != list(df.columns):
+        mapping = {old: new for old, new in zip(df.columns, new_names) if old != new}
+        if mapping:
+            logger.info("Переименованы не-ASCII колонки: %s", mapping)
+        df = df.rename(columns=dict(zip(df.columns, new_names)))
+    return df
+
+
+def _sanitize(df: pd.DataFrame) -> pd.DataFrame:
+    """Приводит числовые колонки к numpy float64 без inf/NaN/pd.NA.
+    Нужно потому что:
+    - ratio-фичи дают inf при делении на 0
+    - pandas nullable types (Float64, Int64) хранят pd.NA != np.nan,
+      и CatBoost / sklearn с ними падают.
+    """
+    df = df.copy()
+    for col in df.columns:
+        s = df[col]
+        if pd.api.types.is_numeric_dtype(s):
+            df[col] = (
+                pd.to_numeric(s, errors="coerce")
+                .replace([np.inf, -np.inf], np.nan)
+                .fillna(0)
+                .astype(float)
+            )
+    return df
+
+
+def _coerce_y(s: pd.Series) -> pd.Series:
+    """Числовой таргет — as-is; строки/категории — Categorical codes (float)."""
+    if pd.api.types.is_numeric_dtype(s):
+        return s.astype(float)
+    return pd.Series(pd.Categorical(s).codes.astype(float), index=s.index)
 
 
 class FeatureGenerationAgent:
@@ -56,25 +124,41 @@ class FeatureGenerationAgent:
             logger.warning("GigaChat-генерация упала (%s) — переходим на fallback.", exc)
             train_new, test_new = self._fallback_features(ctx)
 
-        # Объединяем исходные фичи (без target / id) + только-новые колонки
+        # Выбираем лучшие оригинальные фичи
         exclude = {ctx.target_col, ctx.id_col}
-        orig_cols = [c for c in ctx.train_frame.columns if c not in exclude]
+        orig_cols = self._select_best_orig_cols(ctx, exclude)
         existing = set(orig_cols)
+
+        # Выравниваем индексы — pd.concat требует совпадения
+        n_tr = len(ctx.train_frame)
+        n_te = len(ctx.test_frame)
 
         train_orig = ctx.train_frame[orig_cols].reset_index(drop=True)
         test_orig = ctx.test_frame[
             [c for c in orig_cols if c in ctx.test_frame.columns]
         ].reset_index(drop=True)
 
-        new_only_tr = train_new[
-            [c for c in train_new.columns if c not in existing]
-        ].reset_index(drop=True)
-        new_only_te = test_new[
-            [c for c in test_new.columns if c not in existing]
-        ].reset_index(drop=True)
+        new_only_tr = (
+            train_new[[c for c in train_new.columns if c not in existing]]
+            .reset_index(drop=True)
+            .iloc[:n_tr]           # защита от лишних строк из exec
+        )
+        new_only_te = (
+            test_new[[c for c in test_new.columns if c not in existing]]
+            .reset_index(drop=True)
+            .iloc[:n_te]
+        )
 
-        ctx.feature_matrix_train = pd.concat([train_orig, new_only_tr], axis=1)
-        ctx.feature_matrix_test = pd.concat([test_orig, new_only_te], axis=1)
+        ctx.feature_matrix_train = _sanitize_columns(_sanitize(
+            pd.concat([train_orig, new_only_tr], axis=1).reset_index(drop=True)
+        ))
+        ctx.feature_matrix_test = _sanitize_columns(_sanitize(
+            pd.concat([test_orig, new_only_te], axis=1).reset_index(drop=True)
+        ))
+        # Синхронизируем имена: test берёт колонки из train (может не хватать новых)
+        shared = [c for c in ctx.feature_matrix_train.columns
+                  if c in ctx.feature_matrix_test.columns]
+        ctx.feature_matrix_test = ctx.feature_matrix_test[shared]
         ctx.feature_column_names = list(ctx.feature_matrix_train.columns)
 
         logger.info(
@@ -82,10 +166,56 @@ class FeatureGenerationAgent:
             len(ctx.feature_column_names), len(orig_cols), len(new_only_tr.columns),
         )
 
+    @staticmethod
+    def _select_best_orig_cols(ctx: RunContext, exclude: set) -> list[str]:
+        """Выбирает не более _MAX_ORIG_COLS оригинальных колонок.
+
+        Числовые — топ по |corr с таргетом|.
+        Категориальные (nunique <= 10) — топ по разбросу target rate.
+        """
+        df = ctx.train_frame
+        target = ctx.target_col
+        all_cols = [c for c in df.columns if c not in exclude]
+
+        num_cols = [c for c in all_cols if pd.api.types.is_numeric_dtype(df[c])]
+        cat_cols = [
+            c for c in all_cols
+            if not pd.api.types.is_numeric_dtype(df[c])
+            and not pd.api.types.is_datetime64_any_dtype(df[c])
+            and df[c].nunique() <= 10
+        ]
+
+        if target and target in df.columns:
+            y_num = _coerce_y(df[target])
+
+            corrs: dict[str, float] = {}
+            for c in num_cols:
+                try:
+                    corrs[c] = abs(float(df[c].corr(y_num)))
+                except Exception:
+                    corrs[c] = 0.0
+            num_sorted = sorted(num_cols, key=lambda c: corrs.get(c, 0.0), reverse=True)
+
+            cat_spread: dict[str, float] = {}
+            for c in cat_cols:
+                try:
+                    tmp = pd.DataFrame({"__col__": df[c], "__y__": y_num}).dropna()
+                    grp = tmp.groupby("__col__")["__y__"].mean()
+                    cat_spread[c] = float(grp.max() - grp.min())
+                except Exception:
+                    cat_spread[c] = 0.0
+            cat_sorted = sorted(cat_cols, key=lambda c: cat_spread.get(c, 0.0), reverse=True)
+        else:
+            num_sorted = num_cols
+            cat_sorted = cat_cols
+
+        selected = num_sorted[:10] + cat_sorted[:5]
+        return selected[:_MAX_ORIG_COLS]
+
     def _call_gigachat_and_exec(
         self, ctx: RunContext
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Вызывает GigaChat, извлекает код, выполняет exec, возвращает новые колонки."""
+        """Вызывает GigaChat, извлекает код, выполняет exec, возвращает только НОВЫЕ колонки."""
         from gigachat.models import Chat, Messages, MessagesRole
 
         exclude = {ctx.target_col, ctx.id_col}
@@ -96,7 +226,6 @@ class FeatureGenerationAgent:
             readme=ctx.readme_text,
             available_columns=available_cols,
         )
-
         payload = Chat(
             messages=[
                 Messages(role=MessagesRole.SYSTEM, content=FEATURE_GENERATION_SYSTEM),
@@ -110,7 +239,6 @@ class FeatureGenerationAgent:
 
         raw_content = completion.choices[0].message.content or ""
         code = self._extract_code(raw_content)
-
         if not code.strip():
             raise ValueError("GigaChat не вернул Python-блок с кодом.")
 
@@ -119,21 +247,13 @@ class FeatureGenerationAgent:
 
     @staticmethod
     def _extract_code(text: str) -> str:
-        """Вытаскивает содержимое первого ```python ... ``` блока."""
         match = _CODE_BLOCK_RE.search(text)
-        if match:
-            return match.group(1)
-        # Если модель не обернула в блок — возвращаем весь текст как есть.
-        return text
+        return match.group(1) if match else text
 
     def _exec_feature_code(
         self, code: str, ctx: RunContext
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Выполняет код в контролируемом namespace.
-        Namespace содержит только: train_df, test_df, pd, np.
-        Возвращает только НОВЫЕ колонки (не из исходного train_frame).
-        """
+        """Выполняет код в контролируемом namespace, возвращает только новые колонки."""
         original_cols = set(ctx.train_frame.columns)
 
         namespace: dict = {
@@ -155,14 +275,14 @@ class FeatureGenerationAgent:
         if not new_cols:
             raise ValueError("После exec() новых колонок не появилось.")
 
-        # Убедимся, что те же колонки есть и в test
-        test_new_cols = [c for c in new_cols if c in test_out.columns]
-        missing_in_test = set(new_cols) - set(test_new_cols)
+        # Берём только колонки, которые появились в обоих датафреймах
+        shared_new = [c for c in new_cols if c in test_out.columns]
+        missing_in_test = set(new_cols) - set(shared_new)
         if missing_in_test:
             logger.warning("Отсутствуют в test после exec: %s", missing_in_test)
 
-        logger.info("exec() успешен, новых колонок: %d", len(test_new_cols))
-        return train_out[test_new_cols], test_out[test_new_cols]
+        logger.info("exec() успешен, новых колонок: %d", len(shared_new))
+        return train_out[shared_new], test_out[shared_new]
 
     # ------------------------------------------------------------------
     # Fallback — базовые числовые трансформации без GigaChat
@@ -171,8 +291,8 @@ class FeatureGenerationAgent:
     def _fallback_features(
         self, ctx: RunContext
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Базовые трансформации числовых фичей: log1p, sq, попарные ratio.
-        Оригинальные колонки не дублируем — они добавятся в _generate_feature_matrices.
+        """log1p, sq, попарные ratio для числовых фичей.
+        Оригиналы не дублируем — они добавятся в _generate_feature_matrices.
         """
         logger.info("Fallback: генерируем базовые числовые трансформации.")
         exclude = {ctx.target_col, ctx.id_col}
@@ -220,15 +340,13 @@ class FeatureGenerationAgent:
                     / denom_e
                 ).fillna(0)
 
-        idx_tr = ctx.train_frame.index
-        idx_te = ctx.test_frame.index
         return (
-            pd.DataFrame(feats_tr, index=idx_tr),
-            pd.DataFrame(feats_te, index=idx_te),
+            pd.DataFrame(feats_tr, index=ctx.train_frame.index),
+            pd.DataFrame(feats_te, index=ctx.test_frame.index),
         )
 
     # ------------------------------------------------------------------
-    # Шаги 2-3: метрики и промпт агента отбора
+    # Шаги 2-3: метрики и промпт
     # ------------------------------------------------------------------
 
     def _compute_metrics(self, ctx: RunContext) -> None:
