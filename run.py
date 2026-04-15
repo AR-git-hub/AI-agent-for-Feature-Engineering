@@ -1,54 +1,54 @@
-"""Точка входа: `python run.py` (ТЗ). Линейный MAS без отдельного оркестратора."""
+"""Точка входа: python run.py запускает полный мультиагентный пайплайн."""
+
 from __future__ import annotations
 
 import logging
 import os
-import shutil
+from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
+from langchain_gigachat.chat_models import GigaChat
 
-load_dotenv()
+from src.agents.orchestrator import run_pipeline
 
-from src.mas.logging_setup import configure_logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
-configure_logging()
+DATA_DIR = Path("data")
+OUTPUT_DIR = Path("output")
 
-logger = logging.getLogger("run")
 
+def build_gigachat(config: dict[str, Any] | None = None) -> GigaChat:
+    gc_cfg = (config or {}).get("gigachat", {})
+    credentials = os.getenv("GIGACHAT_CREDENTIALS")
+    scope = os.getenv("GIGACHAT_SCOPE")
+    if not credentials:
+        raise RuntimeError("Missing GIGACHAT_CREDENTIALS in environment")
+    if not scope:
+        raise RuntimeError("Missing GIGACHAT_SCOPE in environment")
 
-def run_pipeline():
-    from src.mas.agents import (
-        AnswerAgent,
-        DatasetAgent,
-        FeatureGenerationAgent,
-        FeatureSelectionAgent,
+    return GigaChat(
+        credentials=credentials,
+        scope=scope,
+        model=gc_cfg.get("model", "GigaChat-2-Max"),
+        temperature=float(gc_cfg.get("temperature", 0.2)),
+        timeout=int(gc_cfg.get("timeout", 120)),
+        verify_ssl_certs=bool(gc_cfg.get("verify_ssl_certs", False)),
     )
-    from src.mas.config import CONFIGS_DIR, DATA_DIR, OUTPUT_DIR
-    from src.mas.context import RunContext
 
-    _ = os.environ.get("GIGACHAT_CREDENTIALS"), os.environ.get("GIGACHAT_SCOPE")
 
-    ctx = RunContext(data_dir=DATA_DIR, output_dir=OUTPUT_DIR, configs_dir=CONFIGS_DIR)
-
-    steps = [
-        ("DatasetAgent", DatasetAgent()),
-        ("FeatureGenerationAgent", FeatureGenerationAgent()),
-        ("FeatureSelectionAgent", FeatureSelectionAgent()),
-        ("AnswerAgent", AnswerAgent()),
-    ]
-    for name, agent in steps:
-        logger.info(">>> %s: start", name)
-        ctx = agent.run(ctx)
-        logger.info("<<< %s: done", name)
-
-    # Удаляем catboost_info и наш временный каталог, чтобы их бинарные tfevents-файлы
-    # не мешали последующему запуску check_submission.py (scoring.py падает на 3-м
-    # fold CV если находит в catboost_info чужой events.out.tfevents).
-    for _cb_dir in ("catboost_info", "output/.cb_imp_tmp"):
-        shutil.rmtree(_cb_dir, ignore_errors=True)
-
-    return ctx
+def main() -> None:
+    load_dotenv()
+    logger.info("Инициализация GigaChat...")
+    llm = build_gigachat()
+    logger.info("GigaChat готов. Запуск оркестратора.")
+    run_pipeline(llm)
 
 
 if __name__ == "__main__":
-    run_pipeline()
+    main()
